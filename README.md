@@ -97,8 +97,9 @@ The platform features 10 fully developed, accessible pages with client-side hash
 
 ## 🛠 Tech Stack
 
-- **Framework:** React
-- **Build Tool:** Vite
+- **Framework:** React 19 (`react@^19.0.0`, `react-dom@^19.0.0`)
+- **Build Tool:** Vite 5.4.x (`vite@^5.4.14`, `@vitejs/plugin-react@^4.3.4`, `esbuild@^0.21.5`)
+- **Type Checking:** TypeScript 5.7.x (`typescript@~5.7.3`)
 - **Styling:** Standard CSS (`src/styles/main.css`) — Zero Tailwind, zero bloated utility frameworks
 - **Icons:** Lucide React
 - **Architecture:** 100% Client-Side Static Single Page Application (SPA)
@@ -116,11 +117,11 @@ The platform features 10 fully developed, accessible pages with client-side hash
 
 ```bash
 # Clone the repository
-git clone https://github.com/royverse0/roycash.git
-cd roycash
+git clone https://github.com/royverse0/roycash-platform.git
+cd roycash-platform
 
 # Install dependencies
-npm install
+npm ci
 ```
 
 ### Development Server
