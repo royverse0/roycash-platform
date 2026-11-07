@@ -62,7 +62,7 @@ async function startServer() {
         return next();
       }
 
-      const customHeader = req.headers['x-requested-with'] || req.headers['x-admin-token'];
+      const customHeader = req.headers['x-requested-with'];
       const contentType = req.headers['content-type'] || '';
       const isJson = contentType.includes('application/json');
 

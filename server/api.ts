@@ -337,7 +337,7 @@ apiRouter.post('/offers/click', requireAuth, (req: AuthenticatedRequest, res: Re
       return res.status(400).json({ success: false, error: 'Campaign ID is required.' });
     }
 
-    const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ? AND status = "active"').get(campaign_id) as any;
+    const campaign = db.prepare("SELECT * FROM campaigns WHERE id = ? AND status = 'active'").get(campaign_id) as any;
     if (!campaign) {
       return res.status(404).json({ success: false, error: 'Campaign is inactive or not found.' });
     }
@@ -584,23 +584,8 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
     const txId = params.order_id || params.tx_id || params.transaction_id || ('tx_' + Date.now());
     const eventType = (params.event || params.status || 'action').toLowerCase();
     const amount = parseFloat(params.amount || params.payout || '0');
-    const token = params.token || params.key || req.headers['x-mitgo-signature'];
+    const token = (params.token || params.key || req.headers['x-mitgo-signature'] || req.headers['x-postback-token']) as string | undefined;
     const now = new Date().toISOString();
-
-    const providerConfig = db.prepare('SELECT * FROM provider_integrations WHERE id = ?').get('mitgo') as any;
-
-    // Signature verification if postback_key is configured
-    let signatureValid = true;
-    if (providerConfig?.postback_key && providerConfig.postback_key !== 'sec_mitgo_sandbox_key') {
-      if (token !== providerConfig.postback_key) {
-        signatureValid = false;
-      }
-    }
-
-    if (!signatureValid) {
-      logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'signature_invalid', 403);
-      return res.status(403).json({ success: false, error: 'Invalid postback token/signature.' });
-    }
 
     if (!clickId) {
       logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), null, txId, eventType, 'missing_click_id', 400);
@@ -608,7 +593,7 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
     }
 
     const click = db.prepare(`
-      SELECT c.*, cmp.requires_install, cmp.requires_signup, cmp.requires_kyc, cmp.requires_deposit, cmp.reward_amount
+      SELECT c.*, cmp.requires_install, cmp.requires_signup, cmp.requires_kyc, cmp.requires_deposit, cmp.reward_amount, cmp.is_demo
       FROM offer_clicks c
       JOIN campaigns cmp ON c.campaign_id = cmp.id
       WHERE c.click_id = ?
@@ -619,7 +604,54 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Click ID not found in ledger.' });
     }
 
-    // Idempotency check: Reject duplicate event for same transaction_id
+    const isLiveCampaign = click.is_demo === 0;
+    const providerConfig = db.prepare('SELECT * FROM provider_integrations WHERE id = ?').get('mitgo') as any;
+
+    // PROVIDER POSTBACK SECURITY & AUTHENTICATION
+    if (isLiveCampaign) {
+      // Live campaign postback must have valid production provider authentication
+      const expectedKey = process.env.MITGO_POSTBACK_KEY || providerConfig?.postback_key;
+      if (!expectedKey || expectedKey === 'sec_mitgo_sandbox_key') {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'live_provider_unconfigured', 403);
+        return res.status(403).json({
+          success: false,
+          error: 'Live provider authentication is unconfigured. Live postbacks require verified MITGO_POSTBACK_KEY.',
+        });
+      }
+
+      if (!token) {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'missing_token', 403);
+        return res.status(403).json({ success: false, error: 'Missing postback authentication token/signature.' });
+      }
+
+      const tokenBuf = Buffer.from(String(token));
+      const keyBuf = Buffer.from(String(expectedKey));
+      if (tokenBuf.length !== keyBuf.length || !crypto.timingSafeEqual(tokenBuf, keyBuf)) {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'signature_invalid', 403);
+        return res.status(403).json({ success: false, error: 'Invalid live postback token/signature.' });
+      }
+    } else {
+      // Sandbox / Demo Campaign
+      if (config.isProd || process.env.NODE_ENV === 'production') {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'sandbox_in_prod_rejected', 403);
+        return res.status(403).json({
+          success: false,
+          error: 'Sandbox demo campaigns cannot receive postbacks in a production environment.',
+        });
+      }
+
+      const expectedKey = providerConfig?.postback_key || 'sec_mitgo_sandbox_key';
+      if (token && expectedKey) {
+        const tokenBuf = Buffer.from(String(token));
+        const keyBuf = Buffer.from(String(expectedKey));
+        if (tokenBuf.length !== keyBuf.length || !crypto.timingSafeEqual(tokenBuf, keyBuf)) {
+          logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'sandbox_token_invalid', 403);
+          return res.status(403).json({ success: false, error: 'Invalid sandbox postback token.' });
+        }
+      }
+    }
+
+    // Idempotency check: Reject duplicate event for same transaction_id and step_type
     const existingEvent = db.prepare(`
       SELECT id FROM offer_events WHERE click_id = ? AND transaction_id = ? AND step_type = ?
     `).get(clickId, txId, eventType);
@@ -647,27 +679,62 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
       now
     );
 
-    // Evaluate overall campaign step completion
-    const events = db.prepare('SELECT step_type FROM offer_events WHERE click_id = ? AND status = "confirmed"').all(clickId) as any[];
-    const confirmedTypes = new Set(events.map((e) => e.step_type));
+    // Evaluate overall campaign step completion:
+    // Check specific campaign_steps if defined, otherwise check boolean flags
+    const configuredSteps = db.prepare(`
+      SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
+    `).all(click.campaign_id) as { step_type: string }[];
 
-    const needsInstall = click.requires_install && !confirmedTypes.has('install');
-    const needsSignup = click.requires_signup && !confirmedTypes.has('signup');
-    const needsKyc = click.requires_kyc && !confirmedTypes.has('kyc');
-    const needsDeposit = click.requires_deposit && !confirmedTypes.has('deposit');
+    const confirmedEvents = db.prepare(`
+      SELECT step_type FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')
+    `).all(clickId) as { step_type: string }[];
+    const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
 
-    const allStepsDone = !needsInstall && !needsSignup && !needsKyc && !needsDeposit;
+    const missingSteps: string[] = [];
+    if (configuredSteps.length > 0) {
+      for (const step of configuredSteps) {
+        if (!confirmedTypes.has(step.step_type.toLowerCase())) {
+          missingSteps.push(step.step_type);
+        }
+      }
+    } else {
+      if (click.requires_install && !confirmedTypes.has('install')) missingSteps.push('install');
+      if (click.requires_signup && !confirmedTypes.has('signup')) missingSteps.push('signup');
+      if (click.requires_kyc && !confirmedTypes.has('kyc')) missingSteps.push('kyc');
+      if (click.requires_deposit && !confirmedTypes.has('deposit')) missingSteps.push('deposit');
+    }
 
+    const allStepsCompleted = missingSteps.length === 0;
+
+    // Handle Event Types
     if (eventType === 'rejected' || eventType === 'declined') {
       db.prepare(`
         UPDATE conversions
         SET status = 'rejected', rejection_reason = ?, updated_at = ?
         WHERE click_id = ?
       `).run(params.reason || 'Declined by advertiser validation', now, clickId);
-    } else if (eventType === 'approved' || (allStepsDone && eventType === 'approval')) {
-      // Approve and credit cashback!
+    } else if (eventType === 'reversed' || eventType === 'refunded' || eventType === 'chargeback') {
+      handleReversal(clickId, click.user_id, txId, params.reason || 'Advertiser reversed transaction', now);
+    } else if (eventType === 'approved' || eventType === 'approval') {
+      // STRICT REQUIREMENT: An 'approved' event must NEVER bypass required campaign steps!
+      if (!allStepsCompleted) {
+        db.prepare(`
+          UPDATE conversions
+          SET status = 'pending_unmet_steps', rejection_reason = ?, updated_at = ?
+          WHERE click_id = ?
+        `).run(`Approval received but required steps missing: ${missingSteps.join(', ')}`, now, clickId);
+
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'approval_missing_steps', 422);
+        return res.status(422).json({
+          success: false,
+          error: `Approval rejected: campaign steps not completed. Missing required steps: ${missingSteps.join(', ')}.`,
+          missing_steps: missingSteps,
+        });
+      }
+
+      // Approve and credit cashback safely
       approveConversion(clickId, click.user_id, amount || click.reward_amount, txId, now);
-    } else if (allStepsDone) {
+    } else if (allStepsCompleted) {
       // Mark as pending approval
       db.prepare(`
         UPDATE conversions
@@ -707,6 +774,61 @@ function logPostback(provider: string, method: string, payload: string, headers:
   }
 }
 
+function handleReversal(clickId: string, userId: string, txId: string, reason: string, now: string) {
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const conversion = db.prepare('SELECT id, status, reward_amount FROM conversions WHERE click_id = ?').get(clickId) as any;
+    if (!conversion) {
+      db.exec('ROLLBACK;');
+      return;
+    }
+
+    // If conversion was already approved, debit back the credited cashback from ledger
+    if (conversion.status === 'approved') {
+      const existingDebit = db.prepare(`
+        SELECT id FROM cashback_ledger WHERE conversion_id = ? AND type = 'reversal_debit'
+      `).get(conversion.id);
+
+      if (!existingDebit) {
+        const debitId = 'ldg_' + crypto.randomBytes(8).toString('hex');
+        db.prepare(`
+          INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
+          VALUES (?, ?, ?, 'reversal_debit', ?, 'withdrawable', 'deducted', ?, ?)
+        `).run(debitId, userId, conversion.id, conversion.reward_amount, `Cashback Reversal: ${reason}`, now);
+
+        // Also check if any referral reward was credited for this conversion and reverse it
+        const refReward = db.prepare(`
+          SELECT id, referrer_user_id, reward_amount, status FROM referral_rewards WHERE source_conversion_id = ?
+        `).get(conversion.id) as any;
+
+        if (refReward && refReward.status === 'approved') {
+          db.prepare(`
+            UPDATE referral_rewards SET status = 'reversed' WHERE id = ?
+          `).run(refReward.id);
+
+          const refDebitId = 'ldg_' + crypto.randomBytes(8).toString('hex');
+          db.prepare(`
+            INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
+            VALUES (?, ?, ?, 'referral_reversal', ?, 'withdrawable', 'deducted', ?, ?)
+          `).run(refDebitId, refReward.referrer_user_id, conversion.id, refReward.reward_amount, `Referral Commission Reversal for cancelled order (${txId})`, now);
+        }
+      }
+    }
+
+    // Update conversion status to reversed
+    db.prepare(`
+      UPDATE conversions
+      SET status = 'reversed', rejection_reason = ?, updated_at = ?
+      WHERE click_id = ?
+    `).run(reason, now, clickId);
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    console.error('Error in handleReversal:', err);
+  }
+}
+
 function approveConversion(clickId: string, userId: string, rewardAmount: number, txId: string, now: string) {
   db.exec('BEGIN IMMEDIATE;');
   try {
@@ -740,7 +862,7 @@ function approveConversion(clickId: string, userId: string, rewardAmount: number
     `).run(ledgerId, userId, conversion.id, rewardAmount, now);
 
     // Check for referrer reward (e.g. 10% referral commission)
-    const refRel = db.prepare('SELECT * FROM referral_relationships WHERE referred_user_id = ? AND status = "active"').get(userId) as any;
+    const refRel = db.prepare("SELECT * FROM referral_relationships WHERE referred_user_id = ? AND status = 'active'").get(userId) as any;
     if (refRel) {
       const refRewardAmount = Math.round(rewardAmount * 0.1); // 10%
       if (refRewardAmount > 0) {
@@ -778,13 +900,13 @@ function calculateUserBalances(userId: string) {
   const credits = db.prepare(`
     SELECT COALESCE(SUM(amount), 0) as total
     FROM cashback_ledger
-    WHERE user_id = ? AND type IN ('cashback_credit', 'referral_credit') AND status = 'available'
+    WHERE user_id = ? AND type IN ('cashback_credit', 'referral_credit', 'admin_adjustment') AND status = 'available'
   `).get(userId) as any;
 
   const debits = db.prepare(`
     SELECT COALESCE(SUM(amount), 0) as total
     FROM cashback_ledger
-    WHERE user_id = ? AND type IN ('withdrawal_debit', 'reversal_debit')
+    WHERE user_id = ? AND type IN ('withdrawal_debit', 'reversal_debit', 'referral_reversal')
   `).get(userId) as any;
 
   // Pending Conversions
@@ -1275,8 +1397,40 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
       now
     );
 
-    // If event is approval, approve conversion in sandbox mode
+    // If event is approval, ensure required steps are confirmed first
     if (event_type === 'approval' || event_type === 'approved') {
+      const configuredSteps = db.prepare(`
+        SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
+      `).all(click.campaign_id) as { step_type: string }[];
+
+      const confirmedEvents = db.prepare(`
+        SELECT step_type FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')
+      `).all(click_id) as { step_type: string }[];
+      const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
+
+      const missingSteps: string[] = [];
+      if (configuredSteps.length > 0) {
+        for (const step of configuredSteps) {
+          if (!confirmedTypes.has(step.step_type.toLowerCase())) {
+            missingSteps.push(step.step_type);
+          }
+        }
+      } else {
+        const fullCampaign = db.prepare('SELECT requires_install, requires_signup, requires_kyc, requires_deposit FROM campaigns WHERE id = ?').get(click.campaign_id) as any;
+        if (fullCampaign?.requires_install && !confirmedTypes.has('install')) missingSteps.push('install');
+        if (fullCampaign?.requires_signup && !confirmedTypes.has('signup')) missingSteps.push('signup');
+        if (fullCampaign?.requires_kyc && !confirmedTypes.has('kyc')) missingSteps.push('kyc');
+        if (fullCampaign?.requires_deposit && !confirmedTypes.has('deposit')) missingSteps.push('deposit');
+      }
+
+      if (missingSteps.length > 0) {
+        return res.status(422).json({
+          success: false,
+          error: `Simulated approval rejected: campaign steps not completed. Missing required steps: ${missingSteps.join(', ')}. Simulate individual steps first before simulating approval.`,
+          missing_steps: missingSteps,
+        });
+      }
+
       approveConversion(click_id, click.user_id, amount || click.default_reward, txId, now);
     }
 

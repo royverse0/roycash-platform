@@ -27,12 +27,10 @@ function getClientIp(req: Request): string {
   return req.socket.remoteAddress || '127.0.0.1';
 }
 
-// Admin Authentication Middleware: extracts & validates session
+// Admin Authentication Middleware: extracts & validates session ONLY from HttpOnly cookie
 export function adminAuthMiddleware(req: AdminRequest, res: Response, next: NextFunction) {
-  const token =
-    req.cookies?.roycash_admin_token ||
-    (req.headers['x-admin-token'] as string) ||
-    req.headers.authorization?.replace(/^Bearer\s+/i, '');
+  // STRICT SECURITY: Accept admin authentication exclusively through secure HttpOnly session cookie
+  const token = req.cookies?.roycash_admin_token;
 
   if (!token) {
     return next();
@@ -191,7 +189,6 @@ adminAuthRouter.post('/setup-initial', (req: Request, res: Response) => {
     return res.status(201).json({
       success: true,
       message: 'Root administrator configured successfully.',
-      token: sessionToken,
       admin: {
         id: adminId,
         username,
@@ -356,7 +353,6 @@ adminAuthRouter.post('/login', (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      token: sessionToken,
       admin: {
         id: admin.id,
         username: admin.username,
@@ -374,10 +370,8 @@ adminAuthRouter.post('/login', (req: Request, res: Response) => {
 
 // 4. Admin Logout (destroys active session)
 adminAuthRouter.post('/logout', (req: AdminRequest, res: Response) => {
-  const token =
-    req.cookies?.roycash_admin_token ||
-    (req.headers['x-admin-token'] as string) ||
-    req.headers.authorization?.replace(/^Bearer\s+/i, '');
+  // Extract token strictly from HttpOnly cookie
+  const token = req.cookies?.roycash_admin_token;
 
   const clientIp = getClientIp(req);
   const userAgent = (req.headers['user-agent'] as string) || 'browser';
@@ -395,7 +389,12 @@ adminAuthRouter.post('/logout', (req: AdminRequest, res: Response) => {
     logAdminActivity(req.admin.id, 'ADMIN_LOGOUT', { method: 'explicit_logout' }, clientIp, userAgent);
   }
 
-  res.clearCookie('roycash_admin_token', { path: '/' });
+  res.clearCookie('roycash_admin_token', {
+    path: '/',
+    httpOnly: true,
+    secure: config.isProd,
+    sameSite: 'lax',
+  });
   res.json({ success: true, message: 'Admin session terminated successfully.' });
 });
 
