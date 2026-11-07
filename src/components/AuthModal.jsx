@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Lock, Mail, User, Phone, ArrowRight, Shield, KeyRound, CheckCircle2 } from 'lucide-react';
+import { X, Lock, Mail, User, Phone, ArrowRight, Shield } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
 export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
@@ -37,30 +37,10 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
       }
       onClose();
     } catch (err) {
-      setError(err.message || 'Authentication failed.');
+      setError(err.message || 'Authentication failed. Please verify your credentials.');
     } finally {
       setLoading(false);
     }
-  };
-
-  // Quick fill demo credentials for effortless testing
-  const quickFill = (type) => {
-    if (type === 'admin') {
-      setMode('login');
-      setFormData((prev) => ({
-        ...prev,
-        email: 'admin@roycash.net',
-        password: 'Admin@RoyCash2026!',
-      }));
-    } else {
-      setMode('login');
-      setFormData((prev) => ({
-        ...prev,
-        email: 'demo@roycash.net',
-        password: 'User@RoyCash2026!',
-      }));
-    }
-    setError('');
   };
 
   return (
@@ -106,86 +86,122 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
               }}
               style={{ flex: 1 }}
             >
-              Register
+              Create Account
             </button>
           </div>
         </div>
 
         {error && (
-          <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '8px', padding: '12px 14px', marginBottom: '18px', color: '#FCA5A5', fontSize: '0.875rem' }}>
+          <div
+            style={{
+              padding: '10px 14px',
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: '8px',
+              color: '#F87171',
+              fontSize: '0.8125rem',
+              marginBottom: '16px',
+            }}
+          >
             {error}
           </div>
         )}
 
         <form onSubmit={handleSubmit}>
           {mode === 'register' && (
-            <div className="form-group">
-              <label htmlFor="auth-name">Full Name *</label>
+            <>
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  Full Name
+                </label>
+                <div style={{ position: 'relative' }}>
+                  <User size={16} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
+                  <input
+                    type="text"
+                    name="name"
+                    required
+                    value={formData.name}
+                    onChange={handleChange}
+                    placeholder="Enter your full name"
+                    className="contact-input"
+                    style={{ paddingLeft: '40px', width: '100%' }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  Phone Number (Optional)
+                </label>
+                <div style={{ position: 'relative' }}>
+                  <Phone size={16} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
+                  <input
+                    type="tel"
+                    name="phone"
+                    value={formData.phone}
+                    onChange={handleChange}
+                    placeholder="Optional for payout notifications"
+                    className="contact-input"
+                    style={{ paddingLeft: '40px', width: '100%' }}
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          <div style={{ marginBottom: '14px' }}>
+            <label style={{ display: 'block', fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+              Email Address
+            </label>
+            <div style={{ position: 'relative' }}>
+              <Mail size={16} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
               <input
-                id="auth-name"
-                name="name"
-                type="text"
+                type="email"
+                name="email"
                 required
-                placeholder="e.g. Rahul Verma"
-                value={formData.name}
+                value={formData.email}
                 onChange={handleChange}
+                placeholder="name@example.com"
+                className="contact-input"
+                style={{ paddingLeft: '40px', width: '100%' }}
               />
             </div>
-          )}
+          </div>
 
-          <div className="form-group">
-            <label htmlFor="auth-email">Email Address *</label>
-            <input
-              id="auth-email"
-              name="email"
-              type="email"
-              required
-              placeholder="name@example.com"
-              value={formData.email}
-              onChange={handleChange}
-            />
+          <div style={{ marginBottom: mode === 'register' ? '14px' : '20px' }}>
+            <label style={{ display: 'block', fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+              Password
+            </label>
+            <div style={{ position: 'relative' }}>
+              <Lock size={16} style={{ position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-dim)' }} />
+              <input
+                type="password"
+                name="password"
+                required
+                minLength={8}
+                value={formData.password}
+                onChange={handleChange}
+                placeholder="••••••••••••"
+                className="contact-input"
+                style={{ paddingLeft: '40px', width: '100%' }}
+              />
+            </div>
           </div>
 
           {mode === 'register' && (
-            <div className="form-group">
-              <label htmlFor="auth-phone">Mobile Number (Optional)</label>
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', fontSize: '0.8125rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                Referral Code (Optional)
+              </label>
               <input
-                id="auth-phone"
-                name="phone"
-                type="tel"
-                placeholder="+91 98765 43210"
-                value={formData.phone}
-                onChange={handleChange}
-              />
-            </div>
-          )}
-
-          <div className="form-group">
-            <label htmlFor="auth-password">Password (min 8 characters) *</label>
-            <input
-              id="auth-password"
-              name="password"
-              type="password"
-              required
-              placeholder="••••••••"
-              value={formData.password}
-              onChange={handleChange}
-            />
-          </div>
-
-          {mode === 'register' && (
-            <div className="form-group">
-              <label htmlFor="auth-referral">Referral Code (Optional)</label>
-              <input
-                id="auth-referral"
-                name="referral_code"
                 type="text"
-                placeholder="e.g. ROYARUN"
+                name="referral_code"
                 value={formData.referral_code}
                 onChange={handleChange}
-                style={{ textTransform: 'uppercase' }}
+                placeholder="e.g. ROY12345"
+                className="contact-input"
+                style={{ width: '100%', textTransform: 'uppercase' }}
               />
-              <div className="form-hint">Got a referral from a friend? Enter their code to link accounts.</div>
             </div>
           )}
 
@@ -198,31 +214,6 @@ export default function AuthModal({ isOpen, onClose, initialMode = 'login' }) {
             {loading ? 'Authenticating...' : mode === 'login' ? 'Sign In to Dashboard' : 'Create My Account'}
           </button>
         </form>
-
-        {/* Quick Testing Bar */}
-        <div style={{ marginTop: '24px', paddingTop: '18px', borderTop: '1px solid var(--border-subtle)', textAlign: 'center' }}>
-          <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '10px' }}>
-            Quick Demo Credentials
-          </div>
-          <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => quickFill('demo')}
-              style={{ fontSize: '0.75rem', padding: '6px 12px' }}
-            >
-              Demo User
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => quickFill('admin')}
-              style={{ fontSize: '0.75rem', padding: '6px 12px', color: 'var(--gold-accent)' }}
-            >
-              Superadmin
-            </button>
-          </div>
-        </div>
       </div>
     </div>
   );

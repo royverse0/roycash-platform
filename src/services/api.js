@@ -14,12 +14,8 @@ async function request(endpoint, options = {}) {
     headers['Authorization'] = `Bearer ${token}`;
   }
 
-  // Admin session token (if calling admin routes)
-  const adminToken = localStorage.getItem('roycash_admin_token');
-  if (adminToken && endpoint.startsWith('/admin')) {
-    headers['x-admin-token'] = adminToken;
-    headers['Authorization'] = `Bearer ${adminToken}`;
-  }
+  // Anti-CSRF protection header for server cookie verification
+  headers['X-Requested-With'] = 'XMLHttpRequest';
 
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     ...options,

@@ -1,4 +1,5 @@
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 export interface ServerConfig {
   port: number;
@@ -21,8 +22,27 @@ export interface ServerConfig {
   };
 }
 
+// Validate production secrets dynamically
+export function validateProductionConfig(targetEnv?: string): void {
+  const currentEnv = targetEnv || process.env.NODE_ENV;
+  if (currentEnv === 'production') {
+    const secret = process.env.ADMIN_SESSION_SECRET;
+    if (!secret || secret.trim().length < 32 || secret === 'roycash_secure_admin_session_secret_2026') {
+      const errorMsg =
+        'FATAL CONFIGURATION ERROR: In production (NODE_ENV=production), ADMIN_SESSION_SECRET must be explicitly configured in the environment with a high-entropy secret of at least 32 characters. Default, fallback, or weak secrets are strictly rejected for production security.';
+      console.error(`\n[SECURITY ALERT] ${errorMsg}\n`);
+      throw new Error(errorMsg);
+    }
+  }
+}
+
 const nodeEnv = (process.env.NODE_ENV as 'development' | 'production' | 'test') || 'development';
 const isProd = nodeEnv === 'production';
+
+// In development, generate an ephemeral random secret if not set to prevent hardcoded predictability
+const devSecret =
+  process.env.ADMIN_SESSION_SECRET ||
+  crypto.randomBytes(32).toString('hex');
 
 const dataDir = path.resolve(process.cwd(), 'data');
 const dbPath = path.join(dataDir, 'roycash.sqlite');
@@ -33,7 +53,7 @@ export const config: ServerConfig = {
   appUrl: process.env.APP_URL || 'http://localhost:3000',
   isProd,
   admin: {
-    sessionSecret: process.env.ADMIN_SESSION_SECRET || 'roycash_secure_admin_session_secret_2026',
+    sessionSecret: isProd ? (process.env.ADMIN_SESSION_SECRET || '') : devSecret,
     sessionExpiryHours: process.env.ADMIN_SESSION_EXPIRY_HOURS ? parseInt(process.env.ADMIN_SESSION_EXPIRY_HOURS, 10) : 12,
     maxLoginAttempts: process.env.ADMIN_MAX_LOGIN_ATTEMPTS ? parseInt(process.env.ADMIN_MAX_LOGIN_ATTEMPTS, 10) : 5,
     lockoutDurationMinutes: process.env.ADMIN_LOCKOUT_MINUTES ? parseInt(process.env.ADMIN_LOCKOUT_MINUTES, 10) : 15,
@@ -48,7 +68,7 @@ export const config: ServerConfig = {
   },
 };
 
-// Safe configuration summary for logging (sanitizes all credentials)
+// Safe configuration summary for logging (sanitizes all credentials and secrets)
 export function getSafeConfigSummary() {
   return {
     port: config.port,
@@ -58,6 +78,7 @@ export function getSafeConfigSummary() {
     sessionExpiryHours: config.admin.sessionExpiryHours,
     maxLoginAttempts: config.admin.maxLoginAttempts,
     lockoutMinutes: config.admin.lockoutDurationMinutes,
+    hasSessionSecretConfigured: Boolean(process.env.ADMIN_SESSION_SECRET),
     hasInitialAdminEnvConfigured: Boolean(config.admin.initialEmail && config.admin.initialPassword),
     hasSetupToken: Boolean(config.admin.setupToken),
   };

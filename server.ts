@@ -2,21 +2,34 @@ import express, { Request, Response, NextFunction } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'node:path';
 import cookieParser from 'cookie-parser';
-import { config, getSafeConfigSummary } from './server/config.js';
+import { config, getSafeConfigSummary, validateProductionConfig } from './server/config.js';
 import { initDatabase, db } from './server/db.js';
 import { apiRouter } from './server/api.js';
 import { adminAuthRouter, adminAuthMiddleware } from './server/adminAuth.js';
 
 async function startServer() {
   console.log('[RoyCash] Initializing backend foundation...');
+
+  // 1. Validate mandatory production secrets immediately on startup
+  validateProductionConfig();
+
   console.log('[RoyCash] Server Configuration:', JSON.stringify(getSafeConfigSummary(), null, 2));
 
-  // Initialize SQLite tables & baseline settings
+  // 2. Initialize SQLite tables & baseline settings
   initDatabase();
 
   const app = express();
   const PORT = config.port;
   const isProd = config.isProd;
+
+  // Security Headers Middleware
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+  });
 
   // Basic security and parsing middleware
   app.use(express.json({ limit: '1mb' }));
@@ -37,6 +50,30 @@ async function startServer() {
       }
     });
 
+    next();
+  });
+
+  // Anti-CSRF protection for cookie-authenticated mutating requests
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const mutatingMethods = ['POST', 'PUT', 'DELETE', 'PATCH'];
+    if (mutatingMethods.includes(req.method) && req.path.startsWith('/api')) {
+      // S2S postbacks are incoming server-to-server callbacks from advertiser networks
+      if (req.path.startsWith('/api/postback')) {
+        return next();
+      }
+
+      const customHeader = req.headers['x-requested-with'] || req.headers['x-admin-token'];
+      const contentType = req.headers['content-type'] || '';
+      const isJson = contentType.includes('application/json');
+
+      // Prevent unauthorized cross-site form submissions
+      if (!customHeader && !isJson) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Missing required anti-forgery request header or unsupported content type.',
+        });
+      }
+    }
     next();
   });
 
@@ -71,9 +108,9 @@ async function startServer() {
   // Mount general API router
   app.use('/api', apiRouter);
 
-  // Centralized Error Handling Middleware
+  // Centralized Error Handling Middleware (hides database details and internal stack traces)
   app.use((err: any, req: Request, res: Response, next: NextFunction) => {
-    console.error(`[Unhandled Error] ${req.method} ${req.url}:`, err);
+    console.error(`[Unhandled Error] ${req.method} ${req.url}:`, err.message || err);
 
     if (res.headersSent) {
       return next(err);
@@ -108,6 +145,6 @@ async function startServer() {
 }
 
 startServer().catch((err) => {
-  console.error('[RoyCash Fatal] Error starting server:', err);
+  console.error('[RoyCash Fatal] Error starting server:', err.message || err);
   process.exit(1);
 });

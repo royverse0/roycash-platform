@@ -2,6 +2,8 @@ import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 import { db, hashPassword, verifyPassword } from './db.js';
 
+import { config } from './config.js';
+
 export const apiRouter = Router();
 
 // Middleware: Extract Authenticated User
@@ -12,6 +14,13 @@ export interface AuthenticatedRequest extends Request {
     name: string;
     role: string;
     referral_code: string;
+  };
+  admin?: {
+    id: string;
+    username: string;
+    email: string;
+    name: string;
+    role: string;
   };
 }
 
@@ -52,8 +61,8 @@ export function requireAuth(req: AuthenticatedRequest, res: Response, next: Next
 }
 
 export function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  if (!req.user || req.user.role !== 'admin') {
-    return res.status(403).json({ success: false, error: 'Administrator access required.' });
+  if (!req.admin) {
+    return res.status(401).json({ success: false, error: 'Administrator authentication required.' });
   }
   next();
 }
@@ -699,39 +708,64 @@ function logPostback(provider: string, method: string, payload: string, headers:
 }
 
 function approveConversion(clickId: string, userId: string, rewardAmount: number, txId: string, now: string) {
-  const conversion = db.prepare('SELECT id, status FROM conversions WHERE click_id = ?').get(clickId) as any;
-  if (!conversion || conversion.status === 'approved') return;
-
-  db.prepare(`
-    UPDATE conversions
-    SET status = 'approved', approved_at = ?, provider_conversion_id = ?, updated_at = ?
-    WHERE click_id = ?
-  `).run(now, txId, now, clickId);
-
-  // Credit cashback ledger as withdrawable
-  const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
-  db.prepare(`
-    INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
-    VALUES (?, ?, ?, 'cashback_credit', ?, 'withdrawable', 'available', 'Verified Cashback Reward', ?)
-  `).run(ledgerId, userId, conversion.id, rewardAmount, now);
-
-  // Check for referrer reward (e.g. 10% referral commission)
-  const refRel = db.prepare('SELECT * FROM referral_relationships WHERE referred_user_id = ? AND status = "active"').get(userId) as any;
-  if (refRel) {
-    const refRewardAmount = Math.round(rewardAmount * 0.1); // 10%
-    if (refRewardAmount > 0) {
-      const rewardId = 'rw_' + crypto.randomBytes(8).toString('hex');
-      db.prepare(`
-        INSERT INTO referral_rewards (id, relationship_id, referrer_user_id, referred_user_id, source_conversion_id, reward_amount, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'approved', ?)
-      `).run(rewardId, refRel.id, refRel.referrer_user_id, userId, conversion.id, refRewardAmount, now);
-
-      const refLedgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
-      db.prepare(`
-        INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
-        VALUES (?, ?, ?, 'referral_credit', ?, 'withdrawable', 'available', 'Referral Commission from Friend Offer', ?)
-      `).run(refLedgerId, refRel.referrer_user_id, conversion.id, refRewardAmount, now);
+  db.exec('BEGIN IMMEDIATE;');
+  try {
+    const conversion = db.prepare('SELECT id, status FROM conversions WHERE click_id = ?').get(clickId) as any;
+    if (!conversion || conversion.status === 'approved') {
+      db.exec('ROLLBACK;');
+      return;
     }
+
+    // Check if cashback credit already exists in ledger for this conversion to prevent double credit
+    const existingCredit = db.prepare(`
+      SELECT id FROM cashback_ledger WHERE conversion_id = ? AND type = 'cashback_credit'
+    `).get(conversion.id);
+
+    if (existingCredit) {
+      db.exec('ROLLBACK;');
+      return;
+    }
+
+    db.prepare(`
+      UPDATE conversions
+      SET status = 'approved', approved_at = ?, provider_conversion_id = ?, updated_at = ?
+      WHERE click_id = ?
+    `).run(now, txId, now, clickId);
+
+    // Credit cashback ledger as withdrawable
+    const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'cashback_credit', ?, 'withdrawable', 'available', 'Verified Cashback Reward', ?)
+    `).run(ledgerId, userId, conversion.id, rewardAmount, now);
+
+    // Check for referrer reward (e.g. 10% referral commission)
+    const refRel = db.prepare('SELECT * FROM referral_relationships WHERE referred_user_id = ? AND status = "active"').get(userId) as any;
+    if (refRel) {
+      const refRewardAmount = Math.round(rewardAmount * 0.1); // 10%
+      if (refRewardAmount > 0) {
+        // Prevent duplicate referral reward for this conversion
+        const existingRefReward = db.prepare('SELECT id FROM referral_rewards WHERE source_conversion_id = ?').get(conversion.id);
+        if (!existingRefReward) {
+          const rewardId = 'rw_' + crypto.randomBytes(8).toString('hex');
+          db.prepare(`
+            INSERT INTO referral_rewards (id, relationship_id, referrer_user_id, referred_user_id, source_conversion_id, reward_amount, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'approved', ?)
+          `).run(rewardId, refRel.id, refRel.referrer_user_id, userId, conversion.id, refRewardAmount, now);
+
+          const refLedgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
+          db.prepare(`
+            INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
+            VALUES (?, ?, ?, 'referral_credit', ?, 'withdrawable', 'available', 'Referral Commission from Friend Offer', ?)
+          `).run(refLedgerId, refRel.referrer_user_id, conversion.id, refRewardAmount, now);
+        }
+      }
+    }
+
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    console.error('Error in approveConversion:', err);
   }
 }
 
@@ -867,25 +901,39 @@ apiRouter.post('/user/withdraw', requireAuth, (req: AuthenticatedRequest, res: R
       return res.status(400).json({ success: false, error: 'Minimum withdrawal amount is ₹100.' });
     }
 
-    const balances = calculateUserBalances(userId);
-    if (balances.withdrawable_balance < withdrawAmount) {
-      return res.status(400).json({ success: false, error: 'Insufficient withdrawable balance.' });
+    if (!payout_method || !payout_details) {
+      return res.status(400).json({ success: false, error: 'Payout method and valid details are required.' });
     }
 
     const now = new Date().toISOString();
     const withdrawalId = 'wdr_' + crypto.randomBytes(8).toString('hex');
-
-    db.prepare(`
-      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
-      VALUES (?, ?, ?, 'INR', ?, ?, 'pending', ?)
-    `).run(withdrawalId, userId, withdrawAmount, payout_method, JSON.stringify(payout_details), now);
-
-    // Debit from ledger immediately to hold funds
     const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
-    db.prepare(`
-      INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-      VALUES (?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held Pending Review', ?)
-    `).run(ledgerId, userId, withdrawAmount, now);
+
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      // Re-verify balance inside write transaction
+      const balances = calculateUserBalances(userId);
+      if (balances.withdrawable_balance < withdrawAmount) {
+        db.exec('ROLLBACK;');
+        return res.status(400).json({ success: false, error: 'Insufficient withdrawable balance.' });
+      }
+
+      db.prepare(`
+        INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+        VALUES (?, ?, ?, 'INR', ?, ?, 'pending', ?)
+      `).run(withdrawalId, userId, withdrawAmount, payout_method, JSON.stringify(payout_details), now);
+
+      // Debit from ledger immediately to hold funds
+      db.prepare(`
+        INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
+        VALUES (?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held Pending Review', ?)
+      `).run(ledgerId, userId, withdrawAmount, now);
+
+      db.exec('COMMIT;');
+    } catch (txErr) {
+      db.exec('ROLLBACK;');
+      throw txErr;
+    }
 
     return res.json({
       success: true,
@@ -893,7 +941,7 @@ apiRouter.post('/user/withdraw', requireAuth, (req: AuthenticatedRequest, res: R
       withdrawal_id: withdrawalId,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: 'Failed to process withdrawal request.' });
   }
 });
 
@@ -1059,26 +1107,49 @@ apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res:
     const now = new Date().toISOString();
     const withdrawalId = String(req.params.id);
 
-    db.prepare(`
-      UPDATE withdrawal_requests
-      SET status = ?, reference_id = ?, rejection_reason = ?, processed_at = ?
-      WHERE id = ?
-    `).run(status, reference_id || null, rejection_reason || null, now, withdrawalId);
+    if (!['approved', 'rejected', 'processing'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'Invalid withdrawal status.' });
+    }
 
-    // If rejected, refund the held balance back to user's withdrawable ledger
-    if (status === 'rejected') {
-      const wdr = db.prepare('SELECT user_id, amount FROM withdrawal_requests WHERE id = ?').get(withdrawalId) as any;
-      if (wdr) {
+    const wdr = db.prepare('SELECT id, user_id, amount, status FROM withdrawal_requests WHERE id = ?').get(withdrawalId) as any;
+    if (!wdr) {
+      return res.status(404).json({ success: false, error: 'Withdrawal request not found.' });
+    }
+
+    // STRICT IDEMPOTENCY: An already processed withdrawal cannot be re-processed or re-refunded
+    if (wdr.status !== 'pending' && wdr.status !== 'processing') {
+      return res.status(400).json({
+        success: false,
+        error: `Withdrawal request has already been finalized (current status: '${wdr.status}'). Duplicate status modifications or repeated refunds are strictly prevented.`,
+      });
+    }
+
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare(`
+        UPDATE withdrawal_requests
+        SET status = ?, reference_id = ?, rejection_reason = ?, processed_at = ?
+        WHERE id = ?
+      `).run(status, reference_id || null, rejection_reason || null, now, withdrawalId);
+
+      // If rejected, refund the held balance back to user's withdrawable ledger EXACTLY ONCE
+      if (status === 'rejected') {
+        const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
         db.prepare(`
           INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-          VALUES (?, ?, 'admin_adjustment', ?, 'withdrawable', 'available', 'Refund of Rejected Withdrawal Request', ?)
-        `).run('ldg_' + crypto.randomBytes(8).toString('hex'), wdr.user_id, wdr.amount, now);
+          VALUES (?, ?, 'admin_adjustment', ?, 'withdrawable', 'available', ?, ?)
+        `).run(ledgerId, wdr.user_id, wdr.amount, `Refund of Rejected Withdrawal Request (${withdrawalId})`, now);
       }
+
+      db.exec('COMMIT;');
+    } catch (txErr) {
+      db.exec('ROLLBACK;');
+      throw txErr;
     }
 
     return res.json({ success: true, message: `Withdrawal request marked as ${status}.` });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: 'Failed to update withdrawal status.' });
   }
 });
 
@@ -1114,35 +1185,65 @@ apiRouter.get('/admin/postback-logs', requireAdmin, (req: Request, res: Response
 });
 
 apiRouter.get('/admin/provider-status', requireAdmin, (req: Request, res: Response) => {
-  const provider = db.prepare('SELECT * FROM provider_integrations WHERE id = ?').get('mitgo') as any;
+  const provider = db.prepare('SELECT id, name, is_live, status, last_sync_at, created_at FROM provider_integrations WHERE id = ?').get('mitgo') as any;
+  const hasClientId = Boolean(process.env.MITGO_CLIENT_ID);
+  const hasClientSecret = Boolean(process.env.MITGO_CLIENT_SECRET);
+  const hasPostbackKey = Boolean(process.env.MITGO_POSTBACK_KEY);
+
   return res.json({
     success: true,
     provider: {
-      ...provider,
-      has_client_id: Boolean(process.env.MITGO_CLIENT_ID),
-      has_client_secret: Boolean(process.env.MITGO_CLIENT_SECRET),
+      id: 'mitgo',
+      name: 'Mitgo Performance Network',
+      is_live: 0, // Zero until live credentials verified
+      status: hasClientId && hasPostbackKey ? 'configured_unverified' : 'sandbox_demo_mode',
+      integration_mode: 'Sandbox / Testing (No Live Mitgo Credentials Configured)',
+      has_client_id: hasClientId,
+      has_client_secret: hasClientSecret,
       has_api_key: Boolean(process.env.MITGO_API_KEY),
-      has_postback_key: Boolean(process.env.MITGO_POSTBACK_KEY),
+      has_postback_key: hasPostbackKey,
+      notes: 'Live tracking requires active Mitgo API client ID, client secret, and verified postback key in production environment.',
     },
   });
 });
 
-// SIMULATED PROVIDER EVENT TOOL (Sandbox Tester)
-// Allows admin/developer to fire simulated postbacks to test install, signup, KYC, deposit, and duplicate protection!
+// SIMULATED PROVIDER EVENT TOOL (Sandbox Tester Only - Strictly Rejected in Production)
 apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Response) => {
   try {
+    // 1. Strictly forbid simulation in production environments
+    if (config.isProd || process.env.NODE_ENV === 'production') {
+      return res.status(403).json({
+        success: false,
+        error: 'Simulation tool is permanently disabled in production environments. Simulated postbacks are rejected to protect ledger integrity.',
+      });
+    }
+
     const { click_id, event_type, amount, is_duplicate } = req.body;
     if (!click_id || !event_type) {
       return res.status(400).json({ success: false, error: 'click_id and event_type are required.' });
     }
 
-    const click = db.prepare('SELECT * FROM offer_clicks WHERE click_id = ?').get(click_id) as any;
+    const click = db.prepare(`
+      SELECT c.*, cmp.is_demo, cmp.name as campaign_name, cmp.reward_amount as default_reward
+      FROM offer_clicks c
+      JOIN campaigns cmp ON c.campaign_id = cmp.id
+      WHERE c.click_id = ?
+    `).get(click_id) as any;
+
     if (!click) {
       return res.status(404).json({ success: false, error: 'Click ID not found.' });
     }
 
+    // 2. Prevent simulating on non-demo/live advertiser campaigns
+    if (click.is_demo !== 1) {
+      return res.status(400).json({
+        success: false,
+        error: 'Simulation is restricted strictly to Sandbox Demo campaigns (is_demo = 1). Live advertiser campaigns cannot be simulated.',
+      });
+    }
+
     // Use fixed tx_id if testing duplicate protection
-    const txId = is_duplicate ? 'SIM_DUP_TX_9999' : 'SIM_' + Date.now();
+    const txId = is_duplicate ? 'SIM_DUP_TX_9999' : 'SIM_SANDBOX_' + Date.now();
     const now = new Date().toISOString();
 
     // Check duplicate
@@ -1158,33 +1259,33 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
       });
     }
 
-    // Insert simulated event
+    // Insert simulated event with clear sandbox tags
     db.prepare(`
       INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'confirmed', ?, '{"simulated": true}', ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, '{"sandbox_simulation": true, "environment": "development"}', ?, ?)
     `).run(
-      'evt_' + crypto.randomBytes(8).toString('hex'),
+      'evt_sim_' + crypto.randomBytes(8).toString('hex'),
       click_id,
       click.user_id,
       click.campaign_id,
       event_type,
-      `Simulated ${event_type.toUpperCase()} Event`,
+      `[SANDBOX] Simulated ${event_type.toUpperCase()} Event`,
       txId,
       now,
       now
     );
 
-    // If event is approval, approve conversion
+    // If event is approval, approve conversion in sandbox mode
     if (event_type === 'approval' || event_type === 'approved') {
-      const camp = db.prepare('SELECT reward_amount FROM campaigns WHERE id = ?').get(click.campaign_id) as any;
-      approveConversion(click_id, click.user_id, amount || camp.reward_amount, txId, now);
+      approveConversion(click_id, click.user_id, amount || click.default_reward, txId, now);
     }
 
     return res.json({
       success: true,
-      message: `Simulated event '${event_type}' processed for click ${click_id}. Check live tracking screen or user ledger!`,
+      message: `[SANDBOX] Simulated event '${event_type}' processed for demo offer '${click.campaign_name}'.`,
+      sandbox: true,
     });
   } catch (err: any) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: 'Failed to process simulated postback.' });
   }
 });

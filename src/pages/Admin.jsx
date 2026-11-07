@@ -139,7 +139,6 @@ export default function Admin({ navigate }) {
       console.error(`Failed to load ${tab}:`, err);
       if (err.status === 401) {
         // Session expired
-        localStorage.removeItem('roycash_admin_token');
         setAuthStatus((prev) => ({ ...prev, authenticated: false, admin: null }));
         setErrorMsg('Admin session has expired. Please log in again.');
       } else {
@@ -174,8 +173,7 @@ export default function Admin({ navigate }) {
         setup_token: setupToken,
       });
 
-      if (res.success && res.token) {
-        localStorage.setItem('roycash_admin_token', res.token);
+      if (res.success) {
         setSuccessMsg('Root administrator established successfully.');
         setAuthStatus({
           needs_initial_setup: false,
@@ -205,8 +203,7 @@ export default function Admin({ navigate }) {
         password: loginPassword,
       });
 
-      if (res.success && res.token) {
-        localStorage.setItem('roycash_admin_token', res.token);
+      if (res.success) {
         setAuthStatus({
           needs_initial_setup: false,
           authenticated: true,
@@ -233,7 +230,6 @@ export default function Admin({ navigate }) {
     } catch (err) {
       console.error('Logout error:', err);
     } finally {
-      localStorage.removeItem('roycash_admin_token');
       setAuthStatus((prev) => ({
         ...prev,
         authenticated: false,
@@ -581,7 +577,7 @@ export default function Admin({ navigate }) {
                   disabled={lockoutSeconds > 0 || loginLoading}
                   value={loginIdentifier}
                   onChange={(e) => setLoginIdentifier(e.target.value)}
-                  placeholder="admin@roycash.net"
+                  placeholder="Enter administrator username or email"
                   className="contact-input"
                   style={{ width: '100%' }}
                 />
