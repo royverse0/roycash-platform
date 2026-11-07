@@ -87,14 +87,22 @@ export default function Home({ navigate, openModal }) {
               </p>
 
               {/* CTAs */}
-              <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', marginBottom: '32px' }}>
+              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap', marginBottom: '32px' }}>
+                <button
+                  type="button"
+                  onClick={() => handleNav('offers')}
+                  className="btn btn-primary"
+                >
+                  <span>Explore Cashback Offers</span>
+                  <ArrowRight size={16} />
+                </button>
+
                 <button
                   type="button"
                   onClick={() => openModal('publisher')}
-                  className="btn btn-primary"
+                  className="btn btn-secondary"
                 >
                   <span>Apply as Publisher</span>
-                  <ArrowRight size={16} />
                 </button>
 
                 <button

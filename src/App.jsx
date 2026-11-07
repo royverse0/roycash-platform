@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import Navbar from './components/Navbar.jsx';
 import Footer from './components/Footer.jsx';
 import ApplicationModal from './components/ApplicationModal.jsx';
+import AuthModal from './components/AuthModal.jsx';
+import { AuthProvider, useAuth } from './context/AuthContext.jsx';
 
-// Pages
+// Existing Network Pages
 import Home from './pages/Home.jsx';
 import Publishers from './pages/Publishers.jsx';
 import Advertisers from './pages/Advertisers.jsx';
@@ -16,10 +18,20 @@ import TermsConditions from './pages/TermsConditions.jsx';
 import Disclaimer from './pages/Disclaimer.jsx';
 import NotFound from './pages/NotFound.jsx';
 
-export default function App() {
+// New Cashback Platform Pages
+import OfferWall from './pages/OfferWall.jsx';
+import LiveTracking from './pages/LiveTracking.jsx';
+import Dashboard from './pages/Dashboard.jsx';
+import Wallet from './pages/Wallet.jsx';
+import Referrals from './pages/Referrals.jsx';
+import Admin from './pages/Admin.jsx';
+
+function MainApp() {
+  const { authModal, closeAuth } = useAuth();
+
   const getInitialRoute = () => {
-    const hash = window.location.hash.replace('#', '').trim().toLowerCase();
-    return hash || 'home';
+    const raw = window.location.hash.replace('#', '').trim();
+    return raw || 'home';
   };
 
   const [currentRoute, setCurrentRoute] = useState(getInitialRoute);
@@ -28,8 +40,8 @@ export default function App() {
   // Sync hash routing
   useEffect(() => {
     const handleHashChange = () => {
-      const hash = window.location.hash.replace('#', '').trim().toLowerCase();
-      setCurrentRoute(hash || 'home');
+      const raw = window.location.hash.replace('#', '').trim();
+      setCurrentRoute(raw || 'home');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     };
 
@@ -39,21 +51,24 @@ export default function App() {
 
   // Sync page title for SEO and UX
   useEffect(() => {
-    const titleMap = {
-      home: 'RoyCash - Premium Affiliate & Performance Marketing Network',
-      publishers: 'For Publishers | RoyCash Performance Network',
-      advertisers: 'For Advertisers | RoyCash Performance Network',
-      'campaign-models': '10 Campaign Performance Models | RoyCash',
-      tracking: 'How Tracking Works & S2S Postbacks | RoyCash',
-      about: 'About Us | RoyCash Performance Network',
-      contact: 'Contact Us | RoyCash Partnerships & Support',
-      privacy: 'Privacy Policy | RoyCash Network',
-      terms: 'Terms & Conditions | RoyCash Network',
-      disclaimer: 'Earnings & Performance Disclaimer | RoyCash Network',
-    };
-
-    const targetTitle = titleMap[currentRoute] || 'Page Not Found | RoyCash Network';
-    document.title = targetTitle;
+    const baseTitle = 'RoyCash - Premium Cashback & Performance Network';
+    if (currentRoute === 'home') document.title = baseTitle;
+    else if (currentRoute === 'offers') document.title = 'Verified Cashback Offers & Campaigns | RoyCash';
+    else if (currentRoute.startsWith('track/')) document.title = 'Live Offer Tracking & Postback Timeline | RoyCash';
+    else if (currentRoute === 'dashboard') document.title = 'Member Dashboard & Wallet | RoyCash';
+    else if (currentRoute === 'wallet') document.title = 'Cashback Wallet & Withdrawals | RoyCash';
+    else if (currentRoute === 'referrals') document.title = 'Referral Hub & Community Rewards | RoyCash';
+    else if (currentRoute === 'admin') document.title = 'Admin Operations Console | RoyCash';
+    else if (currentRoute === 'publishers') document.title = 'For Publishers | RoyCash Network';
+    else if (currentRoute === 'advertisers') document.title = 'For Advertisers | RoyCash Network';
+    else if (currentRoute === 'campaign-models') document.title = '10 Campaign Performance Models | RoyCash';
+    else if (currentRoute === 'tracking') document.title = 'How Tracking Works & S2S Postbacks | RoyCash';
+    else if (currentRoute === 'about') document.title = 'About Us | RoyCash Network';
+    else if (currentRoute === 'contact') document.title = 'Contact Support & Partnerships | RoyCash';
+    else if (currentRoute === 'privacy') document.title = 'Privacy Policy | RoyCash Network';
+    else if (currentRoute === 'terms') document.title = 'Terms & Conditions | RoyCash Network';
+    else if (currentRoute === 'disclaimer') document.title = 'Earnings & Performance Disclaimer | RoyCash';
+    else document.title = 'Page Not Found | RoyCash Network';
   }, [currentRoute]);
 
   const navigate = (route) => {
@@ -71,7 +86,26 @@ export default function App() {
 
   // Route resolver
   const renderCurrentPage = () => {
+    // Dynamic tracking route: track/:clickId
+    if (currentRoute.startsWith('track/')) {
+      const clickId = currentRoute.replace('track/', '').split('?')[0];
+      return <LiveTracking clickId={clickId} navigate={navigate} />;
+    }
+
     switch (currentRoute) {
+      // New Cashback Platform Routes
+      case 'offers':
+        return <OfferWall navigate={navigate} />;
+      case 'dashboard':
+        return <Dashboard navigate={navigate} />;
+      case 'wallet':
+        return <Wallet navigate={navigate} />;
+      case 'referrals':
+        return <Referrals navigate={navigate} />;
+      case 'admin':
+        return <Admin navigate={navigate} />;
+
+      // Existing Preserved Marketing Pages
       case 'home':
         return <Home navigate={navigate} openModal={openModal} />;
       case 'publishers':
@@ -110,6 +144,20 @@ export default function App() {
         initialType={modalState.type}
         onClose={closeModal}
       />
+
+      <AuthModal
+        isOpen={authModal.isOpen}
+        initialMode={authModal.initialMode}
+        onClose={closeAuth}
+      />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <MainApp />
+    </AuthProvider>
   );
 }

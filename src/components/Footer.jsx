@@ -39,7 +39,10 @@ export default function Footer({ navigate }) {
           <div className="footer-col">
             <h4>Ecosystem</h4>
             <ul className="footer-links">
-              <li><a href="#home" onClick={(e) => handleNav('home', e)}>Network Overview</a></li>
+              <li><a href="#offers" onClick={(e) => handleNav('offers', e)}>Cashback Offers Wall</a></li>
+              <li><a href="#dashboard" onClick={(e) => handleNav('dashboard', e)}>Member Dashboard</a></li>
+              <li><a href="#wallet" onClick={(e) => handleNav('wallet', e)}>Wallet &amp; Withdrawals</a></li>
+              <li><a href="#referrals" onClick={(e) => handleNav('referrals', e)}>Referral Hub</a></li>
               <li><a href="#publishers" onClick={(e) => handleNav('publishers', e)}>For Publishers</a></li>
               <li><a href="#advertisers" onClick={(e) => handleNav('advertisers', e)}>For Advertisers</a></li>
               <li><a href="#campaign-models" onClick={(e) => handleNav('campaign-models', e)}>Campaign Models (10 Models)</a></li>
@@ -65,6 +68,7 @@ export default function Footer({ navigate }) {
               <li><a href="#privacy" onClick={(e) => handleNav('privacy', e)}>Privacy Policy</a></li>
               <li><a href="#terms" onClick={(e) => handleNav('terms', e)}>Terms &amp; Conditions</a></li>
               <li><a href="#disclaimer" onClick={(e) => handleNav('disclaimer', e)}>Earnings Disclaimer</a></li>
+              <li><a href="#admin" onClick={(e) => handleNav('admin', e)}>Admin Console</a></li>
               <li><a href="#tracking" onClick={(e) => handleNav('tracking', e)}>Fraud &amp; Deduplication</a></li>
             </ul>
           </div>
