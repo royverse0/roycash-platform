@@ -119,25 +119,92 @@ adminAuthRouter.get('/status', (req: AdminRequest, res: Response) => {
   }
 });
 
-// 2. One-time initial superadmin setup (strictly disabled once any admin exists)
+// Rate limiting tracker for setup attempts
+const setupAttempts = new Map<string, { count: number; resetAt: number }>();
+
+function checkSetupRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = setupAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    setupAttempts.set(ip, { count: 1, resetAt: now + 15 * 60 * 1000 }); // 15 min window
+    return true;
+  }
+  if (entry.count >= 5) {
+    return false; // Exceeded 5 setup attempts per 15 min
+  }
+  entry.count++;
+  return true;
+}
+
+// 2. One-time initial superadmin setup (strictly atomic, transaction-locked)
 adminAuthRouter.post('/setup-initial', (req: Request, res: Response) => {
+  const clientIp = getClientIp(req);
+  const userAgent = (req.headers['user-agent'] as string) || 'browser';
+
   try {
-    const countRow = db.prepare('SELECT COUNT(*) as count FROM admins').get() as { count: number };
-    if (countRow.count > 0) {
+    // Immediate check if initial setup is already completed
+    const existingCount = (db.prepare('SELECT COUNT(*) as count FROM admins').get() as { count: number }).count;
+    if (existingCount > 0) {
       return res.status(403).json({
         success: false,
         error: 'Initial admin setup has already been completed. This endpoint is permanently disabled.',
       });
     }
 
+    // Rate limiting to prevent brute forcing setup token or flooding setup attempts
+    if (!checkSetupRateLimit(clientIp)) {
+      return res.status(429).json({
+        success: false,
+        error: 'Too many setup attempts from this IP address. Please try again after 15 minutes.',
+      });
+    }
+
     const { email, password, name, setup_token } = req.body;
 
-    // Verify setup token if configured in environment
-    if (config.admin.setupToken && setup_token !== config.admin.setupToken) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid or missing admin setup token.',
-      });
+    // Require setup authorization: In production, or whenever ADMIN_SETUP_TOKEN is configured
+    const configuredToken = process.env.ADMIN_SETUP_TOKEN || config.admin.setupToken;
+    const providedToken = setup_token || (req.headers['x-admin-setup-token'] as string | undefined);
+
+    const currentEnv = process.env.NODE_ENV || (config.isProd ? 'production' : 'development');
+    const isProductionMode = currentEnv === 'production';
+
+    if (isProductionMode) {
+      if (!configuredToken || configuredToken.trim().length < 16) {
+        return res.status(503).json({
+          success: false,
+          error: 'Initial admin setup is disabled: ADMIN_SETUP_TOKEN is not configured in production.',
+        });
+      }
+      if (!providedToken || typeof providedToken !== 'string') {
+        return res.status(401).json({
+          success: false,
+          error: 'Setup token is required for initial admin authorization.',
+        });
+      }
+      const tokenBuf = Buffer.from(providedToken);
+      const confBuf = Buffer.from(configuredToken);
+      if (tokenBuf.length !== confBuf.length || !crypto.timingSafeEqual(tokenBuf, confBuf)) {
+        return res.status(401).json({
+          success: false,
+          error: 'Invalid admin setup token.',
+        });
+      }
+    } else if (configuredToken) {
+      // In development/test mode, if configuredToken is set, strictly enforce authorization
+      if (!providedToken || typeof providedToken !== 'string') {
+        return res.status(401).json({
+          success: false,
+          error: 'Setup token is required for initial admin authorization.',
+        });
+      }
+      const tokenBuf = Buffer.from(providedToken);
+      const confBuf = Buffer.from(configuredToken);
+      if (tokenBuf.length !== confBuf.length || !crypto.timingSafeEqual(tokenBuf, confBuf)) {
+        return res.status(401).json({
+          success: false,
+          error: 'Invalid admin setup token.',
+        });
+      }
     }
 
     if (!email || typeof email !== 'string' || !email.includes('@')) {
@@ -153,28 +220,42 @@ adminAuthRouter.post('/setup-initial', (req: Request, res: Response) => {
     const username = cleanEmail.split('@')[0].replace(/[^a-z0-9_]/g, '') || 'admin';
     const adminId = `adm_${crypto.randomBytes(8).toString('hex')}`;
     const now = new Date().toISOString();
-    const clientIp = getClientIp(req);
-    const userAgent = (req.headers['user-agent'] as string) || 'browser';
 
     const { hash, salt } = hashPassword(password);
-
-    db.prepare(`
-      INSERT INTO admins (
-        id, username, email, name, password_hash, salt, role, status,
-        failed_attempts, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'superadmin', 'active', 0, ?, ?)
-    `).run(adminId, username, cleanEmail, cleanName, hash, salt, now, now);
-
-    // Create initial session
     const sessionToken = crypto.randomBytes(32).toString('hex');
     const tokenHashed = hashToken(sessionToken);
     const sessionId = `admsess_${crypto.randomBytes(10).toString('hex')}`;
     const expiresAt = new Date(Date.now() + config.admin.sessionExpiryHours * 3600 * 1000).toISOString();
 
-    db.prepare(`
-      INSERT INTO admin_sessions (id, admin_id, token_hash, ip_address, user_agent, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(sessionId, adminId, tokenHashed, clientIp, userAgent, expiresAt, now);
+    // ATOMIC SETUP: Execute inside BEGIN IMMEDIATE transaction to prevent concurrent race conditions
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      const countRow = db.prepare('SELECT COUNT(*) as count FROM admins').get() as { count: number };
+      if (countRow.count > 0) {
+        db.exec('ROLLBACK;');
+        return res.status(403).json({
+          success: false,
+          error: 'Initial admin setup has already been completed. This endpoint is permanently disabled.',
+        });
+      }
+
+      db.prepare(`
+        INSERT INTO admins (
+          id, username, email, name, password_hash, salt, role, status,
+          failed_attempts, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'superadmin', 'active', 0, ?, ?)
+      `).run(adminId, username, cleanEmail, cleanName, hash, salt, now, now);
+
+      db.prepare(`
+        INSERT INTO admin_sessions (id, admin_id, token_hash, ip_address, user_agent, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(sessionId, adminId, tokenHashed, clientIp, userAgent, expiresAt, now);
+
+      db.exec('COMMIT;');
+    } catch (txErr) {
+      db.exec('ROLLBACK;');
+      throw txErr;
+    }
 
     logAdminActivity(adminId, 'INITIAL_SUPERADMIN_CREATED', { email: cleanEmail, name: cleanName }, clientIp, userAgent);
 

@@ -57,20 +57,66 @@ async function startServer() {
   app.use((req: Request, res: Response, next: NextFunction) => {
     const mutatingMethods = ['POST', 'PUT', 'DELETE', 'PATCH'];
     if (mutatingMethods.includes(req.method) && req.path.startsWith('/api')) {
-      // S2S postbacks are incoming server-to-server callbacks from advertiser networks
+      // S2S postbacks are incoming server-to-server callbacks from advertiser networks,
+      // authenticated by their own provider signature / cryptographic keys, not user cookies
       if (req.path.startsWith('/api/postback')) {
         return next();
       }
 
-      const customHeader = req.headers['x-requested-with'];
-      const contentType = req.headers['content-type'] || '';
-      const isJson = contentType.includes('application/json');
+      // Check if request is authenticated via cookies (admin cookie or user cookie)
+      const hasCookieAuth = Boolean(req.cookies?.roycash_admin_token || req.cookies?.roycash_token);
 
-      // Prevent unauthorized cross-site form submissions
-      if (!customHeader && !isJson) {
+      // Verify Origin / Referer against trusted origins
+      const rawOrigin = req.headers['origin'];
+      const rawReferer = req.headers['referer'];
+
+      let requestOrigin: string | null = null;
+      if (typeof rawOrigin === 'string' && rawOrigin) {
+        requestOrigin = rawOrigin.trim().toLowerCase();
+      } else if (typeof rawReferer === 'string' && rawReferer) {
+        try {
+          const parsed = new URL(rawReferer);
+          requestOrigin = parsed.origin.toLowerCase();
+        } catch {
+          requestOrigin = null;
+        }
+      }
+
+      // Allowed origins: host header, APP_URL origin, localhost, or same host
+      const host = req.get('host')?.toLowerCase();
+      const allowedOrigins = new Set<string>();
+
+      if (host) {
+        allowedOrigins.add(`http://${host}`);
+        allowedOrigins.add(`https://${host}`);
+      }
+      if (config.appUrl) {
+        try {
+          const appUrlParsed = new URL(config.appUrl);
+          allowedOrigins.add(appUrlParsed.origin.toLowerCase());
+        } catch {
+          // ignore
+        }
+      }
+      allowedOrigins.add('http://localhost:3000');
+      allowedOrigins.add('http://127.0.0.1:3000');
+
+      const currentEnv = process.env.NODE_ENV || (config.isProd ? 'production' : 'development');
+      const isProductionMode = currentEnv === 'production';
+
+      // If cookie-authenticated or mutating API request, require valid Origin / Referer from trusted origin
+      if (hasCookieAuth || requestOrigin !== null) {
+        if (!requestOrigin || !allowedOrigins.has(requestOrigin)) {
+          return res.status(403).json({
+            success: false,
+            error: 'Forbidden: CSRF protection rejected request. Missing or untrusted Origin / Referer.',
+          });
+        }
+      } else if (isProductionMode) {
+        // In production, reject any mutating API call lacking a valid Origin/Referer
         return res.status(403).json({
           success: false,
-          error: 'Forbidden: Missing required anti-forgery request header or unsupported content type.',
+          error: 'Forbidden: Missing Origin or Referer header for mutating request.',
         });
       }
     }

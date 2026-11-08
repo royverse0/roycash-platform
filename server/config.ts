@@ -33,6 +33,15 @@ export function validateProductionConfig(targetEnv?: string): void {
       console.error(`\n[SECURITY ALERT] ${errorMsg}\n`);
       throw new Error(errorMsg);
     }
+
+    // In production, require strong ADMIN_SETUP_TOKEN for initial setup authorization
+    const setupToken = process.env.ADMIN_SETUP_TOKEN;
+    if (setupToken && (setupToken.trim().length < 16 || setupToken === 'admin_setup_token_placeholder')) {
+      const errorMsg =
+        'FATAL CONFIGURATION ERROR: In production, ADMIN_SETUP_TOKEN must be a high-entropy secret of at least 16 characters.';
+      console.error(`\n[SECURITY ALERT] ${errorMsg}\n`);
+      throw new Error(errorMsg);
+    }
   }
 }
 

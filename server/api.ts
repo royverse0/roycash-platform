@@ -609,30 +609,24 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
 
     // PROVIDER POSTBACK SECURITY & AUTHENTICATION
     if (isLiveCampaign) {
-      // Live campaign postback must have valid production provider authentication
-      const expectedKey = process.env.MITGO_POSTBACK_KEY || providerConfig?.postback_key;
-      if (!expectedKey || expectedKey === 'sec_mitgo_sandbox_key') {
-        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'live_provider_unconfigured', 403);
-        return res.status(403).json({
-          success: false,
-          error: 'Live provider authentication is unconfigured. Live postbacks require verified MITGO_POSTBACK_KEY.',
-        });
-      }
-
-      if (!token) {
-        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'missing_token', 403);
-        return res.status(403).json({ success: false, error: 'Missing postback authentication token/signature.' });
-      }
-
-      const tokenBuf = Buffer.from(String(token));
-      const keyBuf = Buffer.from(String(expectedKey));
-      if (tokenBuf.length !== keyBuf.length || !crypto.timingSafeEqual(tokenBuf, keyBuf)) {
-        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'signature_invalid', 403);
-        return res.status(403).json({ success: false, error: 'Invalid live postback token/signature.' });
-      }
+      // REQUIREMENT 4:
+      // "Do not invent Mitgo signature algorithms, headers, endpoints, or authentication rules."
+      // "If the actual verification method cannot be confirmed, keep live postbacks disabled and clearly report the missing documentation/configuration."
+      // "Never treat a shared-token check as proof of official Mitgo integration."
+      //
+      // Official Mitgo S2S verification requires contract-specific configuration (e.g. revision HMAC-SHA1 or registered IP whitelisting).
+      // Since live affiliate tracking documentation is not confirmed/contracted for this deployment,
+      // live postbacks are permanently disabled to prevent unauthenticated/fictitious live credits.
+      logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'live_postbacks_disabled_pending_official_docs', 403);
+      return res.status(403).json({
+        success: false,
+        error: 'Live Mitgo postback ingestion is disabled pending official provider documentation and verified contract credentials (HMAC-SHA1 revision keys or verified IP whitelisting). Shared query tokens are not accepted as verified live signatures.',
+        documentation_status: 'unconfirmed_live_provider_signature',
+      });
     } else {
       // Sandbox / Demo Campaign
-      if (config.isProd || process.env.NODE_ENV === 'production') {
+      const currentEnv = process.env.NODE_ENV || (config.isProd ? 'production' : 'development');
+      if (currentEnv === 'production') {
         logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'sandbox_in_prod_rejected', 403);
         return res.status(403).json({
           success: false,
@@ -733,7 +727,15 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
       }
 
       // Approve and credit cashback safely
-      approveConversion(clickId, click.user_id, amount || click.reward_amount, txId, now);
+      const approvalResult = approveConversion(clickId, click.user_id, amount || click.reward_amount, txId, now);
+      if (!approvalResult.success) {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'approval_failed', 422);
+        return res.status(422).json({
+          success: false,
+          error: approvalResult.error || 'Conversion approval failed.',
+          missing_steps: approvalResult.missing_steps,
+        });
+      }
     } else if (allStepsCompleted) {
       // Mark as pending approval
       db.prepare(`
@@ -829,13 +831,78 @@ function handleReversal(clickId: string, userId: string, txId: string, reason: s
   }
 }
 
-function approveConversion(clickId: string, userId: string, rewardAmount: number, txId: string, now: string) {
+export function approveConversion(clickId: string, userId: string, rewardAmount: number, txId: string, now: string): { success: boolean; error?: string; missing_steps?: string[] } {
   db.exec('BEGIN IMMEDIATE;');
   try {
-    const conversion = db.prepare('SELECT id, status FROM conversions WHERE click_id = ?').get(clickId) as any;
-    if (!conversion || conversion.status === 'approved') {
+    const conversion = db.prepare('SELECT id, status, campaign_id, user_id FROM conversions WHERE click_id = ?').get(clickId) as any;
+    if (!conversion) {
       db.exec('ROLLBACK;');
-      return;
+      return { success: false, error: 'Conversion record not found.' };
+    }
+
+    if (conversion.status === 'approved') {
+      db.exec('ROLLBACK;');
+      return { success: true, error: 'Conversion is already approved (idempotent).' };
+    }
+
+    if (conversion.status === 'rejected' || conversion.status === 'reversed') {
+      db.exec('ROLLBACK;');
+      return { success: false, error: `Conversion status is '${conversion.status}'. Cannot approve rejected or reversed conversions.` };
+    }
+
+    // CRITICAL SECURITY REQUIREMENT:
+    // "approveConversion()" must independently verify that every required campaign step has a valid confirmed provider event.
+    // Do not trust callers to perform validation first.
+    // Prevent approval if any required event is missing, rejected, reversed, or invalid.
+    const click = db.prepare(`
+      SELECT c.*, cmp.requires_install, cmp.requires_signup, cmp.requires_kyc, cmp.requires_deposit
+      FROM offer_clicks c
+      JOIN campaigns cmp ON c.campaign_id = cmp.id
+      WHERE c.click_id = ?
+    `).get(clickId) as any;
+
+    if (!click) {
+      db.exec('ROLLBACK;');
+      return { success: false, error: 'Associated click record not found.' };
+    }
+
+    const configuredSteps = db.prepare(`
+      SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
+    `).all(click.campaign_id) as { step_type: string }[];
+
+    // Only confirmed provider events count towards valid step completion
+    const confirmedEvents = db.prepare(`
+      SELECT step_type FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')
+    `).all(clickId) as { step_type: string }[];
+    const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
+
+    const missingSteps: string[] = [];
+    if (configuredSteps.length > 0) {
+      for (const step of configuredSteps) {
+        if (!confirmedTypes.has(step.step_type.toLowerCase())) {
+          missingSteps.push(step.step_type);
+        }
+      }
+    } else {
+      if (click.requires_install && !confirmedTypes.has('install')) missingSteps.push('install');
+      if (click.requires_signup && !confirmedTypes.has('signup')) missingSteps.push('signup');
+      if (click.requires_kyc && !confirmedTypes.has('kyc')) missingSteps.push('kyc');
+      if (click.requires_deposit && !confirmedTypes.has('deposit')) missingSteps.push('deposit');
+    }
+
+    if (missingSteps.length > 0) {
+      db.prepare(`
+        UPDATE conversions
+        SET status = 'pending_unmet_steps', rejection_reason = ?, updated_at = ?
+        WHERE click_id = ?
+      `).run(`Financial approval rejected: missing required steps: ${missingSteps.join(', ')}`, now, clickId);
+
+      db.exec('COMMIT;');
+      return {
+        success: false,
+        error: `Approval rejected: campaign steps not completed. Missing required steps: ${missingSteps.join(', ')}.`,
+        missing_steps: missingSteps,
+      };
     }
 
     // Check if cashback credit already exists in ledger for this conversion to prevent double credit
@@ -845,7 +912,7 @@ function approveConversion(clickId: string, userId: string, rewardAmount: number
 
     if (existingCredit) {
       db.exec('ROLLBACK;');
-      return;
+      return { success: true, error: 'Cashback ledger credit already exists (idempotent).' };
     }
 
     db.prepare(`
@@ -885,9 +952,11 @@ function approveConversion(clickId: string, userId: string, rewardAmount: number
     }
 
     db.exec('COMMIT;');
-  } catch (err) {
+    return { success: true };
+  } catch (err: any) {
     db.exec('ROLLBACK;');
     console.error('Error in approveConversion:', err);
+    return { success: false, error: err.message };
   }
 }
 
@@ -1431,7 +1500,14 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
         });
       }
 
-      approveConversion(click_id, click.user_id, amount || click.default_reward, txId, now);
+      const approvalResult = approveConversion(click_id, click.user_id, amount || click.default_reward, txId, now);
+      if (!approvalResult.success) {
+        return res.status(422).json({
+          success: false,
+          error: approvalResult.error || 'Simulated conversion approval failed.',
+          missing_steps: approvalResult.missing_steps,
+        });
+      }
     }
 
     return res.json({
