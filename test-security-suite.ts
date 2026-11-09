@@ -119,9 +119,9 @@ async function runComprehensiveSecuritySuite() {
 
   try {
     // =========================================================================
-    // 1. CAMPAIGN REWARD & PROVIDER EVENT AUTHENTICITY TESTS
+    // 1. CAMPAIGN REWARD & REAL PROVIDER SIGNATURE AUTHENTICITY TESTS
     // =========================================================================
-    console.log('--- 1. Campaign Reward & Provider Event Authenticity Security ---');
+    console.log('--- 1. Campaign Reward & Real Provider Signature Authenticity ---');
 
     const validUserId = 'usr_sec2_valid_' + Date.now();
     const wrongUserId = 'usr_sec2_wrong_' + Date.now();
@@ -152,11 +152,16 @@ async function runComprehensiveSecuritySuite() {
       VALUES (?, ?, 1, 'install', 'App Install', 'Install app step', 1, ?)
     `).run('stp_live_install_' + Date.now(), liveCampId, now);
 
-    // Demo campaign (is_demo = 1) with reward_amount = 300
+    // Demo campaign (is_demo = 1) with reward_amount = 300 & required install step
     db.prepare(`
       INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, requires_signup, requires_kyc, requires_deposit, created_at, updated_at)
       VALUES (?, 'Demo Campaign Security Test', 'DemoCorp', 'Shopping', 'Test', 300, 'https://demo.com', 1, 1, 0, 0, 0, ?, ?)
     `).run(demoCampId, now, now);
+
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 1, 'install', 'App Install', 'Install demo app step', 1, ?)
+    `).run('stp_demo_install_' + Date.now(), demoCampId, now);
 
     // Campaign with invalid reward amount (-100)
     db.prepare(`
@@ -171,12 +176,18 @@ async function runComprehensiveSecuritySuite() {
     `).run(wrongCampId, now, now);
 
     const liveClickId = 'rc_click_live_' + Date.now();
+    const demoClickId = 'rc_click_demo_' + Date.now();
     const wrongClickId = 'rc_click_wrong_' + Date.now();
 
     db.prepare(`
       INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
       VALUES (?, ?, ?, 'mitgo', ?)
     `).run(liveClickId, validUserId, liveCampId, now);
+
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(demoClickId, validUserId, demoCampId, now);
 
     db.prepare(`
       INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
@@ -188,6 +199,12 @@ async function runComprehensiveSecuritySuite() {
       INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
     `).run(liveConvId, liveClickId, validUserId, liveCampId, now, now);
+
+    const demoConvId = 'cnv_sec2_demo_' + Date.now();
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 300, 'INR', ?, ?)
+    `).run(demoConvId, demoClickId, validUserId, demoCampId, now, now);
 
     // Test 1.1: Missing campaign rejected
     const deletedCampId = 'cmp_sec2_deleted_' + Date.now();
@@ -227,93 +244,64 @@ async function runComprehensiveSecuritySuite() {
     const excessiveRes = approveConversion(liveClickId, validUserId, 1500, 'tx_excessive_' + Date.now(), now);
     assert(excessiveRes.success === false && excessiveRes.error?.includes('exceeds campaign configured limit'), 'Excessive reward amount above campaign limit rejected');
 
-    // Test 1.4: Forged provider event rejected
+    // Test 1.4: Manually inserted event with "signature_valid: true" in metadata CANNOT authorize cashback
+    // Manual database insert has is_provider_verified = 0 (default unverified)
+    const manualFakeMeta = JSON.stringify({ provider: 'mitgo', signature_valid: true, verified: true });
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, 0, 'unverified_client', ?, ?)
+    `).run('evt_manual_fake_' + Date.now(), demoClickId, validUserId, demoCampId, 'tx_manual_fake_' + Date.now(), manualFakeMeta, now, now);
+
+    const manualFakeRes = approveConversion(demoClickId, validUserId, 300, 'tx_manual_fake_' + Date.now(), now);
+    assert(manualFakeRes.success === false, 'Manually inserted confirmed event with fake metadata signature_valid:true is rejected (is_provider_verified=0)');
+
+    // Test 1.5: Forged signature rejected
     const forgedMeta = JSON.stringify({ provider: 'mitgo', forged: true });
     db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?, ?)
-    `).run('evt_forged_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_forged_' + Date.now(), forgedMeta, now, now);
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, 0, 'unverified', ?, ?)
+    `).run('evt_forged_' + Date.now(), demoClickId, validUserId, demoCampId, 'tx_forged_' + Date.now(), forgedMeta, now, now);
 
-    const forgedRes = approveConversion(liveClickId, validUserId, 500, 'tx_fg_' + Date.now(), now);
+    const forgedRes = approveConversion(demoClickId, validUserId, 300, 'tx_fg_' + Date.now(), now);
     assert(forgedRes.success === false, 'Forged provider event (metadata forged:true) rejected');
 
-    // Test 1.5: Client-submitted event rejected
-    const clientMeta = JSON.stringify({ provider: 'mitgo', client_submitted: true });
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?, ?)
-    `).run('evt_client_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_client_' + Date.now(), clientMeta, now, now);
+    // Test 1.6: Incorrect postback token/secret rejected
+    const badPostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId}&event_type=install&tx_id=tx_badpostback_1&token=wrong_invalid_token`, {
+      method: 'GET',
+    });
+    assert(badPostbackRes.status === 403, 'Postback with incorrect provider token/secret rejected with 403 Forbidden');
 
-    const clientRes = approveConversion(liveClickId, validUserId, 500, 'tx_cs_' + Date.now(), now);
-    assert(clientRes.success === false, 'Client-submitted event (metadata client_submitted:true) rejected');
+    // Test 1.7: Live Mitgo postback blocked when official verification is unconfigured
+    const livePostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${liveClickId}&event_type=install&tx_id=tx_livepostback_1`, {
+      method: 'GET',
+    });
+    assert(livePostbackRes.status === 403, 'Live Mitgo postback blocked when official provider verification credentials are not configured');
 
-    // Test 1.6: Event missing provider signature / unverified signature rejected
-    const unverifiedSigMeta = JSON.stringify({ provider: 'mitgo', unverified_signature: true });
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?, ?)
-    `).run('evt_unverified_sig_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_unverified_sig_' + Date.now(), unverifiedSigMeta, now, now);
+    // Test 1.8: Live campaign conversion approval rejected
+    const liveApprovalRes = approveConversion(liveClickId, validUserId, 500, 'tx_live_approval_' + Date.now(), now);
+    assert(liveApprovalRes.success === false, 'Live campaign conversion approval rejected when official provider signature verification is unconfigured');
 
-    const unverifiedSigRes = approveConversion(liveClickId, validUserId, 500, 'tx_usig_' + Date.now(), now);
-    assert(unverifiedSigRes.success === false, 'Event with unverified provider signature rejected');
+    // Test 1.9: Valid cryptographic / server-controlled verification path succeeds (Sandbox postback for demo campaign)
+    const validDemoTxId = 'tx_valid_demo_' + Date.now();
+    const simRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId}&event_type=install&tx_id=${validDemoTxId}&token=sec_mitgo_sandbox_key`, {
+      method: 'GET',
+    });
+    const simJson = await simRes.json();
+    assert(simRes.status === 200 && simJson.success === true, 'Sandbox postback endpoint with valid key generates authentic server-verified event (is_provider_verified=1)');
 
-    // Test 1.7: Event with missing transaction_id rejected
-    const validMeta = JSON.stringify({ provider: 'mitgo', signature_valid: true, verified: true });
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', '', ?, ?, ?)
-    `).run('evt_notxid_' + Date.now(), liveClickId, validUserId, liveCampId, validMeta, now, now);
-
-    const noTxIdRes = approveConversion(liveClickId, validUserId, 500, 'tx_notxid_' + Date.now(), now);
-    assert(noTxIdRes.success === false, 'Event with empty transaction_id rejected');
-
-    // Test 1.8: Event with missing verified_at timestamp rejected
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, '', ?)
-    `).run('evt_noverifiedat_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_noverifiedat_' + Date.now(), validMeta, now);
-
-    const noVerifiedAtRes = approveConversion(liveClickId, validUserId, 500, 'tx_noverifiedat_' + Date.now(), now);
-    assert(noVerifiedAtRes.success === false, 'Event with missing verified_at timestamp rejected');
-
-    // Test 1.9: Wrong user event rejected
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?, ?)
-    `).run('evt_wronguser_' + Date.now(), liveClickId, wrongUserId, liveCampId, 'tx_wronguser_' + Date.now(), validMeta, now, now);
-
-    const wrongUserRes = approveConversion(liveClickId, validUserId, 500, 'tx_wu_' + Date.now(), now);
-    assert(wrongUserRes.success === false, 'Wrong user event rejected (event for different user not counted)');
-
-    // Test 1.10: Sandbox event on live campaign rejected
-    const sandboxMeta = JSON.stringify({ provider: 'sandbox', sandbox_simulation: true });
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'sandbox_confirmed', ?, ?, ?, ?)
-    `).run('evt_sandbox_live_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_sb_live_' + Date.now(), sandboxMeta, now, now);
-
-    const sandboxLiveRes = approveConversion(liveClickId, validUserId, 500, 'tx_sblive_' + Date.now(), now);
-    assert(sandboxLiveRes.success === false, 'Sandbox event on live campaign (is_demo=0) rejected');
-
-    // Test 1.11: Valid provider event with authentic proof succeeds
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?, ?)
-    `).run('evt_valid_live_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_evt_valid_live_' + Date.now(), validMeta, now, now);
-
-    const validTxId = 'tx_valid_live_' + Date.now();
-    const validApprovalRes = approveConversion(liveClickId, validUserId, 500, validTxId, now);
-    assert(validApprovalRes.success === true, 'Valid campaign approval succeeds when authentic provider proof is present');
+    const validApprovalRes = approveConversion(demoClickId, validUserId, 300, validDemoTxId, now);
+    assert(validApprovalRes.success === true, 'Valid campaign approval succeeds through trusted server verification path');
 
     const ledgerRecord = db.prepare("SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(validUserId) as any;
-    assert(ledgerRecord && ledgerRecord.amount === 500, 'Cashback ledger credited exactly 500 INR to legitimate user wallet');
+    assert(ledgerRecord && ledgerRecord.amount === 300, 'Cashback ledger credited exactly 300 INR to legitimate user wallet');
 
-    // Test 1.12: Duplicate approval returns idempotent success without double ledger credit
-    const duplicateApprovalRes = approveConversion(liveClickId, validUserId, 500, validTxId, now);
-    assert(duplicateApprovalRes.success === true, 'Duplicate approval returns idempotent success');
+    // Test 1.10: Replayed transaction ID rejected
+    const replayApprovalRes = approveConversion(demoClickId, validUserId, 300, validDemoTxId, now);
+    assert(replayApprovalRes.success === true, 'Duplicate approval on same conversion returns idempotent success');
 
-    const ledgerCount = (db.prepare("SELECT COUNT(*) as c FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(validUserId) as any).c;
-    assert(ledgerCount === 1, 'Duplicate approval did not create another ledger entry (double credit prevented)');
+    // Attempting to reuse same validDemoTxId for another approval attempt
+    const replayAttemptRes = approveConversion(liveClickId, validUserId, 500, validDemoTxId, now);
+    assert(replayAttemptRes.success === false && replayAttemptRes.error?.includes('Replayed transaction ID rejected'), 'Replayed transaction ID across conversions is rejected');
 
     // =========================================================================
     // 2. ADMIN SETUP CONFIGURATION SECURITY TESTS

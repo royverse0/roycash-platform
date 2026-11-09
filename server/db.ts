@@ -230,6 +230,8 @@ export function initDatabase() {
       status TEXT NOT NULL,
       transaction_id TEXT,
       metadata TEXT,
+      is_provider_verified INTEGER NOT NULL DEFAULT 0,
+      verification_source TEXT DEFAULT 'unverified',
       verified_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (click_id) REFERENCES offer_clicks(click_id) ON DELETE CASCADE,
@@ -366,6 +368,18 @@ export function initDatabase() {
       created_at TEXT NOT NULL
     );
   `);
+
+  // Table column migrations for existing databases
+  try {
+    db.exec(`ALTER TABLE offer_events ADD COLUMN is_provider_verified INTEGER NOT NULL DEFAULT 0;`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE offer_events ADD COLUMN verification_source TEXT DEFAULT 'unverified';`);
+  } catch {
+    // Column already exists
+  }
 
   initSystemSettings();
   bootstrapInitialAdminFromEnv();

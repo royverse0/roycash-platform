@@ -582,7 +582,7 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
     const params = { ...req.query, ...req.body };
     const clickId = params.click_id || params.subid || params.subid1;
     const txId = params.order_id || params.tx_id || params.transaction_id || ('tx_' + Date.now());
-    const eventType = (params.event || params.status || 'action').toLowerCase();
+    const eventType = (params.event_type || params.event || params.event_name || params.status || 'action').toLowerCase();
     const amount = parseFloat(params.amount || params.payout || '0');
     const token = (params.token || params.key || req.headers['x-mitgo-signature'] || req.headers['x-postback-token']) as string | undefined;
     const now = new Date().toISOString();
@@ -658,8 +658,8 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
     // Record the verified event
     const eventId = 'evt_' + crypto.randomBytes(8).toString('hex');
     db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?)
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, ?, 1, 'sandbox_postback', ?, ?)
     `).run(
       eventId,
       clickId,
@@ -904,77 +904,59 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
     const isProdEnv = currentEnv === 'production';
     const isDemoCampaign = campaign.is_demo === 1;
 
+    // Replay Protection: Reject replayed transaction IDs across conversions
+    const replayedTx = db.prepare(`
+      SELECT id FROM conversions
+      WHERE (provider_conversion_id = ? OR (click_id != ? AND status IN ('cashback_credited', 'approved')))
+        AND id != ?
+    `).get(txId, clickId, conversion.id);
+
+    if (replayedTx) {
+      db.exec('ROLLBACK;');
+      return { success: false, error: 'Replayed transaction ID rejected: transaction ID already processed.' };
+    }
+
     // 4. PROVIDER EVENT AUTHENTICITY VERIFICATION
     const rawEvents = db.prepare(`
-      SELECT id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at
+      SELECT id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at
       FROM offer_events
       WHERE click_id = ?
         AND user_id = ?
         AND campaign_id = ?
-    `).all(clickId, authoritativeUserId, conversion.campaign_id) as {
-      id: string;
-      click_id: string;
-      user_id: string;
-      campaign_id: string;
-      step_type: string;
-      event_name: string;
-      status: string;
-      transaction_id: string | null;
-      metadata: string | null;
-      verified_at: string | null;
-      created_at: string;
-    }[];
+    `).all(clickId, authoritativeUserId, conversion.campaign_id) as any[];
 
-    // Filter events to strictly verify provider authenticity, transaction ID, verified_at, and sandbox isolation
+    // Filter events to strictly enforce server-controlled provider verification
     const authenticatedEvents = rawEvents.filter((evt) => {
-      // Must have valid status
+      // Must be marked verified by trusted server verification logic (is_provider_verified === 1)
+      // Never trust client metadata fields like signature_valid: true or verified: true!
+      if (evt.is_provider_verified !== 1) {
+        return false;
+      }
+
+      if (evt.verification_source === 'unverified' || evt.verification_source === 'unverified_client') {
+        return false;
+      }
+
       if (evt.status !== 'confirmed' && evt.status !== 'sandbox_confirmed') {
         return false;
       }
 
-      // Must have valid non-empty transaction_id
       if (!evt.transaction_id || typeof evt.transaction_id !== 'string' || !evt.transaction_id.trim()) {
         return false;
       }
 
-      // Must have valid non-empty verified_at timestamp
       if (!evt.verified_at || typeof evt.verified_at !== 'string' || !evt.verified_at.trim()) {
         return false;
       }
-      const verifiedTimestamp = Date.parse(evt.verified_at);
-      if (Number.isNaN(verifiedTimestamp)) {
-        return false;
-      }
 
-      // Must have non-empty metadata containing provider postback or sandbox proof
-      if (!evt.metadata || typeof evt.metadata !== 'string' || !evt.metadata.trim()) {
-        return false; // Reject events missing provider metadata / proof
-      }
-
-      let parsedMeta: any = null;
-      try {
-        parsedMeta = JSON.parse(evt.metadata);
-      } catch {
-        return false; // Reject unparseable metadata
-      }
-
-      if (!parsedMeta || typeof parsedMeta !== 'object') {
-        return false;
-      }
-
-      // Reject forged, client-submitted, or unauthenticated events
-      if (parsedMeta.forged === true || parsedMeta.unauthenticated === true || parsedMeta.client_submitted === true || parsedMeta.unverified_signature === true) {
-        return false;
-      }
-
-      // Sandbox Isolation: 'sandbox_confirmed' status is ONLY valid for demo campaigns in non-prod environments
-      if (evt.status === 'sandbox_confirmed') {
+      if (evt.status === 'sandbox_confirmed' || evt.verification_source === 'sandbox_simulation' || evt.verification_source === 'sandbox_postback') {
         if (!isDemoCampaign || isProdEnv) {
-          return false; // Reject sandbox events on live campaigns or production env
-        }
-        if (!parsedMeta.sandbox_simulation && !parsedMeta.sandbox) {
           return false;
         }
+      }
+
+      if (!isDemoCampaign) {
+        return false;
       }
 
       return true;
@@ -1562,8 +1544,8 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
 
     // Insert simulated event with clear sandbox tags
     db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, '{"sandbox_simulation": true, "environment": "development"}', ?, ?)
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, '{"sandbox_simulation": true, "environment": "development"}', 1, 'sandbox_simulation', ?, ?)
     `).run(
       'evt_sim_' + crypto.randomBytes(8).toString('hex'),
       click_id,
