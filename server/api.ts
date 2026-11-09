@@ -904,26 +904,83 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
     const isProdEnv = currentEnv === 'production';
     const isDemoCampaign = campaign.is_demo === 1;
 
-    // 'sandbox_confirmed' events are ONLY allowed if isDemoCampaign is true AND environment is NOT production
-    const validStatuses = (isDemoCampaign && !isProdEnv)
-      ? ['confirmed', 'sandbox_confirmed']
-      : ['confirmed'];
-
-    const placeholders = validStatuses.map(() => '?').join(', ');
-    const confirmedEvents = db.prepare(`
-      SELECT step_type, transaction_id, status
+    // 4. PROVIDER EVENT AUTHENTICITY VERIFICATION
+    const rawEvents = db.prepare(`
+      SELECT id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, verified_at, created_at
       FROM offer_events
       WHERE click_id = ?
         AND user_id = ?
         AND campaign_id = ?
-        AND status IN (${placeholders})
-    `).all(clickId, authoritativeUserId, conversion.campaign_id, ...validStatuses) as {
+    `).all(clickId, authoritativeUserId, conversion.campaign_id) as {
+      id: string;
+      click_id: string;
+      user_id: string;
+      campaign_id: string;
       step_type: string;
-      transaction_id: string;
+      event_name: string;
       status: string;
+      transaction_id: string | null;
+      metadata: string | null;
+      verified_at: string | null;
+      created_at: string;
     }[];
 
-    const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
+    // Filter events to strictly verify provider authenticity, transaction ID, verified_at, and sandbox isolation
+    const authenticatedEvents = rawEvents.filter((evt) => {
+      // Must have valid status
+      if (evt.status !== 'confirmed' && evt.status !== 'sandbox_confirmed') {
+        return false;
+      }
+
+      // Must have valid non-empty transaction_id
+      if (!evt.transaction_id || typeof evt.transaction_id !== 'string' || !evt.transaction_id.trim()) {
+        return false;
+      }
+
+      // Must have valid non-empty verified_at timestamp
+      if (!evt.verified_at || typeof evt.verified_at !== 'string' || !evt.verified_at.trim()) {
+        return false;
+      }
+      const verifiedTimestamp = Date.parse(evt.verified_at);
+      if (Number.isNaN(verifiedTimestamp)) {
+        return false;
+      }
+
+      // Must have non-empty metadata containing provider postback or sandbox proof
+      if (!evt.metadata || typeof evt.metadata !== 'string' || !evt.metadata.trim()) {
+        return false; // Reject events missing provider metadata / proof
+      }
+
+      let parsedMeta: any = null;
+      try {
+        parsedMeta = JSON.parse(evt.metadata);
+      } catch {
+        return false; // Reject unparseable metadata
+      }
+
+      if (!parsedMeta || typeof parsedMeta !== 'object') {
+        return false;
+      }
+
+      // Reject forged, client-submitted, or unauthenticated events
+      if (parsedMeta.forged === true || parsedMeta.unauthenticated === true || parsedMeta.client_submitted === true || parsedMeta.unverified_signature === true) {
+        return false;
+      }
+
+      // Sandbox Isolation: 'sandbox_confirmed' status is ONLY valid for demo campaigns in non-prod environments
+      if (evt.status === 'sandbox_confirmed') {
+        if (!isDemoCampaign || isProdEnv) {
+          return false; // Reject sandbox events on live campaigns or production env
+        }
+        if (!parsedMeta.sandbox_simulation && !parsedMeta.sandbox) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+
+    const confirmedTypes = new Set(authenticatedEvents.map((e) => e.step_type.toLowerCase()));
 
     const configuredSteps = db.prepare(`
       SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
