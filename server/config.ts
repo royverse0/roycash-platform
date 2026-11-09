@@ -22,6 +22,37 @@ export interface ServerConfig {
   };
 }
 
+export const SETUP_TOKEN_PLACEHOLDERS = [
+  'admin_setup_token_placeholder',
+  'my_admin_setup_token',
+  'change_me',
+  'placeholder',
+  'default_setup_token',
+  'admin_setup_token',
+  'secret_token',
+  'your_admin_setup_token_here',
+  'configured_strong_setup_token_9999',
+  'configured_strong_setup_token',
+  '12345678901234567890123456789012',
+];
+
+export function validateSetupTokenConfig(token: string | undefined): { valid: boolean; error?: string } {
+  if (!token || typeof token !== 'string') {
+    return { valid: false, error: 'ADMIN_SETUP_TOKEN is missing or not configured.' };
+  }
+  const trimmed = token.trim();
+  if (trimmed.length < 32) {
+    return { valid: false, error: `ADMIN_SETUP_TOKEN is too weak. Length must be at least 32 characters (got ${trimmed.length}).` };
+  }
+  const lower = trimmed.toLowerCase();
+  for (const placeholder of SETUP_TOKEN_PLACEHOLDERS) {
+    if (lower === placeholder.toLowerCase() || lower.includes('placeholder') || lower.includes('change_me')) {
+      return { valid: false, error: `ADMIN_SETUP_TOKEN uses forbidden placeholder '${placeholder}'.` };
+    }
+  }
+  return { valid: true };
+}
+
 // Validate production secrets dynamically
 export function validateProductionConfig(targetEnv?: string): void {
   const currentEnv = targetEnv || process.env.NODE_ENV;
@@ -34,11 +65,10 @@ export function validateProductionConfig(targetEnv?: string): void {
       throw new Error(errorMsg);
     }
 
-    // In production, require strong ADMIN_SETUP_TOKEN for initial setup authorization
-    const setupToken = process.env.ADMIN_SETUP_TOKEN;
-    if (setupToken && (setupToken.trim().length < 16 || setupToken === 'admin_setup_token_placeholder')) {
-      const errorMsg =
-        'FATAL CONFIGURATION ERROR: In production, ADMIN_SETUP_TOKEN must be a high-entropy secret of at least 16 characters.';
+    // In production, require strong ADMIN_SETUP_TOKEN of at least 32 chars without placeholders
+    const setupTokenCheck = validateSetupTokenConfig(process.env.ADMIN_SETUP_TOKEN);
+    if (!setupTokenCheck.valid) {
+      const errorMsg = `FATAL CONFIGURATION ERROR: In production, ADMIN_SETUP_TOKEN must be configured with a high-entropy secret of at least 32 characters and cannot use placeholders. Details: ${setupTokenCheck.error}`;
       console.error(`\n[SECURITY ALERT] ${errorMsg}\n`);
       throw new Error(errorMsg);
     }

@@ -832,6 +832,11 @@ function handleReversal(clickId: string, userId: string, txId: string, reason: s
 }
 
 export function approveConversion(clickId: string, userId: string, rewardAmount: number, txId: string, now: string): { success: boolean; error?: string; missing_steps?: string[] } {
+  // 1. CASHBACK AMOUNT VALIDATION (finite positive number check)
+  if (typeof rewardAmount !== 'number' || Number.isNaN(rewardAmount) || !Number.isFinite(rewardAmount) || rewardAmount <= 0) {
+    return { success: false, error: `Invalid reward amount (${rewardAmount}). Amount must be a finite positive number.` };
+  }
+
   db.exec('BEGIN IMMEDIATE;');
   try {
     const conversion = db.prepare('SELECT id, status, campaign_id, user_id FROM conversions WHERE click_id = ?').get(clickId) as any;
@@ -850,10 +855,27 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
       return { success: false, error: `Conversion status is '${conversion.status}'. Cannot approve rejected or reversed conversions.` };
     }
 
-    // CRITICAL SECURITY REQUIREMENT:
-    // "approveConversion()" must independently verify that every required campaign step has a valid confirmed provider event.
-    // Do not trust callers to perform validation first.
-    // Prevent approval if any required event is missing, rejected, reversed, or invalid.
+    // 2. CASHBACK USER OWNERSHIP VALIDATION
+    const authoritativeUserId = conversion.user_id;
+    if (userId && userId !== authoritativeUserId) {
+      db.exec('ROLLBACK;');
+      return {
+        success: false,
+        error: `User ownership mismatch: supplied user ID '${userId}' does not match conversion beneficiary '${authoritativeUserId}'. Approval rejected.`,
+      };
+    }
+
+    // 3. CAMPAIGN REWARD AMOUNT LIMIT VALIDATION
+    const campaign = db.prepare('SELECT id, reward_amount FROM campaigns WHERE id = ?').get(conversion.campaign_id) as any;
+    if (campaign && typeof campaign.reward_amount === 'number' && rewardAmount > campaign.reward_amount) {
+      db.exec('ROLLBACK;');
+      return {
+        success: false,
+        error: `Approval reward amount (${rewardAmount}) exceeds campaign configured limit (${campaign.reward_amount}).`,
+      };
+    }
+
+    // 4. CAMPAIGN REQUIRED STEPS VALIDATION
     const click = db.prepare(`
       SELECT c.*, cmp.requires_install, cmp.requires_signup, cmp.requires_kyc, cmp.requires_deposit
       FROM offer_clicks c
@@ -921,15 +943,15 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
       WHERE click_id = ?
     `).run(now, txId, now, clickId);
 
-    // Credit cashback ledger as withdrawable
+    // Credit cashback ledger using the authoritative user ID
     const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
     db.prepare(`
       INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
       VALUES (?, ?, ?, 'cashback_credit', ?, 'withdrawable', 'available', 'Verified Cashback Reward', ?)
-    `).run(ledgerId, userId, conversion.id, rewardAmount, now);
+    `).run(ledgerId, authoritativeUserId, conversion.id, rewardAmount, now);
 
-    // Check for referrer reward (e.g. 10% referral commission)
-    const refRel = db.prepare("SELECT * FROM referral_relationships WHERE referred_user_id = ? AND status = 'active'").get(userId) as any;
+    // Check for referrer reward using the authoritative user ID
+    const refRel = db.prepare("SELECT * FROM referral_relationships WHERE referred_user_id = ? AND status = 'active'").get(authoritativeUserId) as any;
     if (refRel) {
       const refRewardAmount = Math.round(rewardAmount * 0.1); // 10%
       if (refRewardAmount > 0) {
@@ -940,7 +962,7 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
           db.prepare(`
             INSERT INTO referral_rewards (id, relationship_id, referrer_user_id, referred_user_id, source_conversion_id, reward_amount, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, 'approved', ?)
-          `).run(rewardId, refRel.id, refRel.referrer_user_id, userId, conversion.id, refRewardAmount, now);
+          `).run(rewardId, refRel.id, refRel.referrer_user_id, authoritativeUserId, conversion.id, refRewardAmount, now);
 
           const refLedgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
           db.prepare(`

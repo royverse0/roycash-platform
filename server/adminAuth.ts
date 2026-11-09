@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { db, hashPassword, verifyPassword, hashToken, logAdminActivity } from './db.js';
-import { config } from './config.js';
+import { config, validateSetupTokenConfig } from './config.js';
 
 export const adminAuthRouter = Router();
 
@@ -169,10 +169,11 @@ adminAuthRouter.post('/setup-initial', (req: Request, res: Response) => {
     const isProductionMode = currentEnv === 'production';
 
     if (isProductionMode) {
-      if (!configuredToken || configuredToken.trim().length < 16) {
+      const tokenCheck = validateSetupTokenConfig(configuredToken);
+      if (!tokenCheck.valid) {
         return res.status(503).json({
           success: false,
-          error: 'Initial admin setup is disabled: ADMIN_SETUP_TOKEN is not configured in production.',
+          error: 'Initial admin setup is disabled: ADMIN_SETUP_TOKEN is not configured or weak in production.',
         });
       }
       if (!providedToken || typeof providedToken !== 'string') {
@@ -182,7 +183,7 @@ adminAuthRouter.post('/setup-initial', (req: Request, res: Response) => {
         });
       }
       const tokenBuf = Buffer.from(providedToken);
-      const confBuf = Buffer.from(configuredToken);
+      const confBuf = Buffer.from(configuredToken!);
       if (tokenBuf.length !== confBuf.length || !crypto.timingSafeEqual(tokenBuf, confBuf)) {
         return res.status(401).json({
           success: false,
