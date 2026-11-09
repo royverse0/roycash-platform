@@ -573,6 +573,83 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
 });
 
 /* ==========================================================================
+   LOG & PAYLOAD SANITIZATION HELPERS
+   ========================================================================== */
+
+const SENSITIVE_LOG_KEYS = new Set([
+  'token',
+  'key',
+  'x-mitgo-signature',
+  'x-postback-token',
+  'authorization',
+  'secret',
+  'client_secret',
+  'api_token',
+  'password',
+  'cookie',
+  'set-cookie',
+  'bearer',
+  'signature',
+  'access_token',
+  'auth_token',
+  'postback_key',
+  'setup_token',
+  'admin_token',
+  'roycash_token',
+  'roycash_admin_token',
+]);
+
+export function sanitizeObjectForLogging(input: any): any {
+  if (!input || typeof input !== 'object') {
+    return input;
+  }
+
+  if (Array.isArray(input)) {
+    return input.map((item) => sanitizeObjectForLogging(item));
+  }
+
+  const sanitized: Record<string, any> = {};
+  for (const [key, val] of Object.entries(input)) {
+    const lowerKey = key.toLowerCase();
+    let isSensitive = SENSITIVE_LOG_KEYS.has(lowerKey);
+    if (!isSensitive) {
+      if (
+        lowerKey.includes('token') ||
+        lowerKey.includes('secret') ||
+        lowerKey.includes('signature') ||
+        lowerKey.includes('pass') ||
+        lowerKey.includes('auth')
+      ) {
+        isSensitive = true;
+      }
+    }
+
+    if (isSensitive) {
+      sanitized[key] = '[REDACTED]';
+    } else if (val && typeof val === 'object') {
+      sanitized[key] = sanitizeObjectForLogging(val);
+    } else {
+      sanitized[key] = val;
+    }
+  }
+
+  return sanitized;
+}
+
+export function sanitizeJsonStringForLogging(input: any): string {
+  if (!input) return JSON.stringify({});
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input);
+      return JSON.stringify(sanitizeObjectForLogging(parsed));
+    } catch {
+      return input.replace(/(token|key|signature|secret|authorization|password)=[^&]+/gi, '$1=[REDACTED]');
+    }
+  }
+  return JSON.stringify(sanitizeObjectForLogging(input));
+}
+
+/* ==========================================================================
    3. MITGO S2S POSTBACK / WEBHOOK INGESTION
    ========================================================================== */
 
@@ -580,16 +657,29 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
 apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
   try {
     const params = { ...req.query, ...req.body };
-    const clickId = params.click_id || params.subid || params.subid1;
-    const txId = params.order_id || params.tx_id || params.transaction_id || ('tx_' + Date.now());
+    const rawClickId = params.click_id || params.subid || params.subid1;
+    const clickId = typeof rawClickId === 'string' ? rawClickId.trim() : (rawClickId ? String(rawClickId).trim() : '');
+
+    const rawTxId = params.order_id || params.tx_id || params.transaction_id;
+    const txId = typeof rawTxId === 'string' ? rawTxId.trim() : (typeof rawTxId === 'number' ? String(rawTxId) : '');
+
     const eventType = (params.event_type || params.event || params.event_name || params.status || 'action').toLowerCase();
     const amount = parseFloat(params.amount || params.payout || '0');
     const token = (params.token || params.key || req.headers['x-mitgo-signature'] || req.headers['x-postback-token']) as string | undefined;
     const now = new Date().toISOString();
 
+    // REQUIREMENT 2: REJECT MISSING OR EMPTY PROVIDER TRANSACTION ID (Do not generate fake tx_' + Date.now())
+    if (!txId) {
+      logPostback('mitgo', req.method, params, req.headers, clickId || null, '[MISSING_TX_ID]', eventType, 'missing_transaction_id', 400);
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required provider transaction_id (or order_id/tx_id) parameter. Fake transaction IDs are not generated.',
+      });
+    }
+
     if (!clickId) {
-      logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), null, txId, eventType, 'missing_click_id', 400);
-      return res.status(400).json({ success: false, error: 'Missing click_id parameter.' });
+      logPostback('mitgo', req.method, params, req.headers, null, txId, eventType, 'missing_click_id', 400);
+      return res.status(400).json({ success: false, error: 'Missing required click_id parameter.' });
     }
 
     const click = db.prepare(`
@@ -773,8 +863,11 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
   }
 });
 
-function logPostback(provider: string, method: string, payload: string, headers: string, clickId: string | null, txId: string, eventType: string, status: string, code: number) {
+function logPostback(provider: string, method: string, rawPayload: any, rawHeaders: any, clickId: string | null, txId: string, eventType: string, status: string, code: number) {
   try {
+    const sanitizedPayload = sanitizeJsonStringForLogging(rawPayload);
+    const sanitizedHeaders = sanitizeJsonStringForLogging(rawHeaders);
+
     db.prepare(`
       INSERT INTO postback_logs (id, provider, endpoint, method, payload, headers, click_id, transaction_id, event_type, status, response_code, created_at)
       VALUES (?, ?, '/api/postback/mitgo', ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -782,10 +875,10 @@ function logPostback(provider: string, method: string, payload: string, headers:
       'pbl_' + crypto.randomBytes(8).toString('hex'),
       provider,
       method,
-      payload,
-      headers,
+      sanitizedPayload,
+      sanitizedHeaders,
       clickId,
-      txId,
+      txId || '[MISSING_TX_ID]',
       eventType,
       status,
       code,

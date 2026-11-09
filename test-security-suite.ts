@@ -120,9 +120,9 @@ async function runComprehensiveSecuritySuite() {
 
   try {
     // =========================================================================
-    // 1. MANDATORY SANDBOX TOKEN & LIVE ARCHITECTURE SECURITY TESTS
+    // 1. MANDATORY SANDBOX TOKEN, LOG SANITIZATION & REPLAY PROTECTION TESTS
     // =========================================================================
-    console.log('--- 1. Mandatory Sandbox Token & Live Architecture Security ---');
+    console.log('--- 1. Mandatory Sandbox Token, Log Sanitization & Replay Protection ---');
 
     const validUserId = 'usr_sec2_valid_' + Date.now();
     const wrongUserId = 'usr_sec2_wrong_' + Date.now();
@@ -219,25 +219,57 @@ async function runComprehensiveSecuritySuite() {
       VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 300, 'INR', ?, ?)
     `).run(demoConvId2, demoClickId2, validUserId, demoCampId, now, now);
 
-    // REGRESSION TEST 1: Missing sandbox token → 403
+    // REGRESSION TEST 1: Missing provider transaction_id → 400 Bad Request
+    const noTxRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install`, {
+      method: 'GET',
+    });
+    const noTxJson = await noTxRes.json();
+    assert(noTxRes.status === 400 && noTxJson.error?.includes('Missing required provider transaction_id'), 'Missing provider transaction_id parameter rejected with 400 Bad Request (fake IDs not generated)');
+
+    // REGRESSION TEST 2: Empty provider transaction_id → 400 Bad Request
+    const emptyTxRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=`, {
+      method: 'GET',
+    });
+    assert(emptyTxRes.status === 400, 'Empty provider transaction_id parameter rejected with 400 Bad Request');
+
+    // REGRESSION TEST 3: Postback secret/token log redaction
+    const secretLogTxId = 'tx_redact_test_' + Date.now();
+    const secretToken = 'SUPER_SECRET_POSTBACK_KEY_9999';
+    const secretHeaderToken = 'SUPER_SECRET_HEADER_TOKEN_7777';
+
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=${secretLogTxId}&token=${secretToken}`, {
+      method: 'GET',
+      headers: {
+        'x-postback-token': secretHeaderToken,
+      },
+    });
+
+    const logRow = db.prepare("SELECT payload, headers FROM postback_logs WHERE transaction_id = ?").get(secretLogTxId) as { payload: string; headers: string } | undefined;
+    assert(Boolean(logRow), 'Postback log entry created in database');
+
+    const payloadRedacted = logRow?.payload.includes('[REDACTED]') && !logRow?.payload.includes(secretToken);
+    const headersRedacted = logRow?.headers.includes('[REDACTED]') && !logRow?.headers.includes(secretHeaderToken);
+    assert(Boolean(payloadRedacted && headersRedacted), 'Postback logs sanitize and redact sensitive query tokens, signatures, and auth headers ([REDACTED] stored)');
+
+    // REGRESSION TEST 4: Missing sandbox token → 403
     const noTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_notoken_1`, {
       method: 'GET',
     });
     assert(noTokenRes.status === 403, 'Missing sandbox token rejected with 403 Forbidden');
 
-    // REGRESSION TEST 2: Empty sandbox token → 403
+    // REGRESSION TEST 5: Empty sandbox token → 403
     const emptyTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_emptytoken_1&token=`, {
       method: 'GET',
     });
     assert(emptyTokenRes.status === 403, 'Empty sandbox token rejected with 403 Forbidden');
 
-    // REGRESSION TEST 3: Wrong sandbox token → 403
+    // REGRESSION TEST 6: Wrong sandbox token → 403
     const wrongTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_wrongtoken_1&token=invalid_secret_abc`, {
       method: 'GET',
     });
     assert(wrongTokenRes.status === 403, 'Wrong sandbox token rejected with 403 Forbidden');
 
-    // REGRESSION TEST 4: Missing sandbox secret configuration → 403
+    // REGRESSION TEST 7: Missing sandbox secret configuration → 403
     const origSandboxKey = process.env.MITGO_SANDBOX_POSTBACK_KEY;
     delete process.env.MITGO_SANDBOX_POSTBACK_KEY;
     db.prepare("UPDATE provider_integrations SET postback_key = NULL WHERE id = 'mitgo'").run();
@@ -251,7 +283,7 @@ async function runComprehensiveSecuritySuite() {
     process.env.MITGO_SANDBOX_POSTBACK_KEY = origSandboxKey;
     db.prepare("UPDATE provider_integrations SET postback_key = ? WHERE id = 'mitgo'").run('valid_test_sandbox_secret_123');
 
-    // REGRESSION TEST 5: Correct sandbox token → accepted ONLY in non-production demo campaigns
+    // REGRESSION TEST 8: Correct sandbox token → accepted ONLY in non-production demo campaigns
     const correctTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_indep_1&token=valid_test_sandbox_secret_123`, {
       method: 'GET',
     });
@@ -279,21 +311,20 @@ async function runComprehensiveSecuritySuite() {
       method: 'GET',
     });
 
-    // REGRESSION TEST 6: Two independent conversions with different transaction IDs → both can succeed
+    // REGRESSION TEST 9: Two independent conversions with different transaction IDs → both can succeed
     const approval1 = approveConversion(demoClickId1, validUserId, 300, 'tx_indep_1', now);
     const approval2 = approveConversion(demoClickId2, validUserId, 300, 'tx_indep_2', now);
     assert(approval1.success === true && approval2.success === true, 'Two independent conversions with different transaction IDs both succeed');
 
-    // REGRESSION TEST 7: Same transaction ID reused across conversions → rejected
-    // Attempting to approve click 3 using tx_indep_1 (already used by click 1)
+    // REGRESSION TEST 10: Same transaction ID reused across conversions → rejected
     const replayedTxApproval = approveConversion(demoClickId3, validUserId, 300, 'tx_indep_1', now);
     assert(replayedTxApproval.success === false && replayedTxApproval.error?.includes('Replayed transaction ID rejected'), 'Reused transaction ID across different conversions is rejected');
 
-    // REGRESSION TEST 8: Same conversion duplicate approval → idempotent success
+    // REGRESSION TEST 11: Same conversion duplicate approval → idempotent success
     const duplicateApproval = approveConversion(demoClickId1, validUserId, 300, 'tx_indep_1', now);
     assert(duplicateApproval.success === true, 'Duplicate approval on same conversion returns idempotent success');
 
-    // REGRESSION TEST 9: Live campaign remains blocked without official Mitgo verification
+    // REGRESSION TEST 12: Live campaign remains blocked without official Mitgo verification
     const livePostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${liveClickId}&event_type=install&tx_id=tx_live_1`, {
       method: 'GET',
     });
@@ -302,7 +333,7 @@ async function runComprehensiveSecuritySuite() {
     const liveApprovalRes = approveConversion(liveClickId, validUserId, 500, 'tx_live_approval_1', now);
     assert(liveApprovalRes.success === false, 'Live campaign conversion approval rejected when official provider signature verification is unconfigured');
 
-    // REGRESSION TEST 10: Existing admin credentials and production database remain untouched by tests
+    // REGRESSION TEST 13: Existing admin credentials and production database remain untouched by tests
     assert(fs.existsSync(testDbPath), 'Security test executed against isolated test database (data/roycash.sqlite untouched)');
 
     // =========================================================================
