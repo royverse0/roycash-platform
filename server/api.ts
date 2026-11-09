@@ -634,14 +634,34 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
         });
       }
 
-      const expectedKey = providerConfig?.postback_key || 'sec_mitgo_sandbox_key';
-      if (token && expectedKey) {
-        const tokenBuf = Buffer.from(String(token));
-        const keyBuf = Buffer.from(String(expectedKey));
-        if (tokenBuf.length !== keyBuf.length || !crypto.timingSafeEqual(tokenBuf, keyBuf)) {
-          logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'sandbox_token_invalid', 403);
-          return res.status(403).json({ success: false, error: 'Invalid sandbox postback token.' });
-        }
+      // MANDATORY SANDBOX SECRET & TOKEN AUTHENTICATION
+      const configuredSecret = process.env.MITGO_SANDBOX_POSTBACK_KEY || providerConfig?.postback_key;
+
+      if (!configuredSecret || typeof configuredSecret !== 'string' || !configuredSecret.trim()) {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'sandbox_secret_missing', 403);
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Sandbox postback secret is missing or unconfigured.',
+        });
+      }
+
+      if (!token || typeof token !== 'string' || !token.trim()) {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'sandbox_token_missing', 403);
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Missing required sandbox postback authentication token.',
+        });
+      }
+
+      const tokenBuf = Buffer.from(token.trim());
+      const secretBuf = Buffer.from(configuredSecret.trim());
+
+      if (tokenBuf.length !== secretBuf.length || !crypto.timingSafeEqual(tokenBuf, secretBuf)) {
+        logPostback('mitgo', req.method, JSON.stringify(params), JSON.stringify(req.headers), clickId, txId, eventType, 'sandbox_token_invalid', 403);
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: Invalid sandbox postback authentication token.',
+        });
       }
     }
 
@@ -904,16 +924,29 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
     const isProdEnv = currentEnv === 'production';
     const isDemoCampaign = campaign.is_demo === 1;
 
-    // Replay Protection: Reject replayed transaction IDs across conversions
-    const replayedTx = db.prepare(`
+    // Replay Protection: Check exact transaction ID uniqueness across conversions and events
+    const replayedConversion = db.prepare(`
       SELECT id FROM conversions
-      WHERE (provider_conversion_id = ? OR (click_id != ? AND status IN ('cashback_credited', 'approved')))
+      WHERE provider_conversion_id = ?
         AND id != ?
-    `).get(txId, clickId, conversion.id);
+        AND status IN ('approved', 'cashback_credited')
+    `).get(txId, conversion.id);
 
-    if (replayedTx) {
+    if (replayedConversion) {
       db.exec('ROLLBACK;');
-      return { success: false, error: 'Replayed transaction ID rejected: transaction ID already processed.' };
+      return { success: false, error: `Replayed transaction ID rejected: transaction ID '${txId}' has already been processed for another conversion.` };
+    }
+
+    const replayedEvent = db.prepare(`
+      SELECT id FROM offer_events
+      WHERE transaction_id = ?
+        AND click_id != ?
+        AND status IN ('confirmed', 'sandbox_confirmed')
+    `).get(txId, clickId);
+
+    if (replayedEvent) {
+      db.exec('ROLLBACK;');
+      return { success: false, error: `Replayed transaction ID rejected: transaction ID '${txId}' was already recorded for a different click.` };
     }
 
     // 4. PROVIDER EVENT AUTHENTICITY VERIFICATION
@@ -933,7 +966,7 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
         return false;
       }
 
-      if (evt.verification_source === 'unverified' || evt.verification_source === 'unverified_client') {
+      if (!evt.verification_source || evt.verification_source === 'unverified' || evt.verification_source === 'unverified_client') {
         return false;
       }
 
@@ -945,21 +978,36 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
         return false;
       }
 
-      if (!evt.verified_at || typeof evt.verified_at !== 'string' || !evt.verified_at.trim()) {
+      if (!evt.verified_at || typeof evt.verified_at !== 'string' || !evt.verified_at.trim() || Number.isNaN(Date.parse(evt.verified_at))) {
         return false;
       }
 
-      if (evt.status === 'sandbox_confirmed' || evt.verification_source === 'sandbox_simulation' || evt.verification_source === 'sandbox_postback') {
-        if (!isDemoCampaign || isProdEnv) {
+      // CAMPAIGN TYPE ARCHITECTURE ISOLATION:
+      if (isDemoCampaign) {
+        // Demo campaigns can ONLY use trusted sandbox verification in non-production environments
+        if (isProdEnv) {
+          return false; // Sandbox prohibited in production
+        }
+        const isSandboxSource = evt.verification_source === 'sandbox_simulation' || evt.verification_source === 'sandbox_postback';
+        if (!isSandboxSource && evt.status !== 'sandbox_confirmed') {
           return false;
         }
-      }
+        return true;
+      } else {
+        // Live campaigns (is_demo === 0) can ONLY use official cryptographically verified provider paths
+        // Sandbox verification sources can NEVER authorize a live campaign!
+        if (evt.status === 'sandbox_confirmed' || evt.verification_source === 'sandbox_simulation' || evt.verification_source === 'sandbox_postback') {
+          return false;
+        }
 
-      if (!isDemoCampaign) {
-        return false;
+        // Official live provider signature verification path
+        // Currently live Mitgo credentials & HMAC verification are unconfigured
+        const isOfficialLiveSource = evt.verification_source === 'mitgo_hmac_verified' || evt.verification_source === 'official_provider_postback';
+        if (!isOfficialLiveSource) {
+          return false; // Fail closed for unconfigured live provider events
+        }
+        return true;
       }
-
-      return true;
     });
 
     const confirmedTypes = new Set(authenticatedEvents.map((e) => e.step_type.toLowerCase()));

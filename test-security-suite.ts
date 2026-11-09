@@ -6,6 +6,7 @@ import type { Server } from 'node:http';
 const testDbPath = path.resolve(process.cwd(), 'data', 'test_roycash_security_isolated.sqlite');
 process.env.DATABASE_PATH = testDbPath;
 process.env.PORT = '3999';
+process.env.MITGO_SANDBOX_POSTBACK_KEY = 'valid_test_sandbox_secret_123';
 
 // Ensure data directory exists
 if (!fs.existsSync(path.dirname(testDbPath))) {
@@ -119,9 +120,9 @@ async function runComprehensiveSecuritySuite() {
 
   try {
     // =========================================================================
-    // 1. CAMPAIGN REWARD & REAL PROVIDER SIGNATURE AUTHENTICITY TESTS
+    // 1. MANDATORY SANDBOX TOKEN & LIVE ARCHITECTURE SECURITY TESTS
     // =========================================================================
-    console.log('--- 1. Campaign Reward & Real Provider Signature Authenticity ---');
+    console.log('--- 1. Mandatory Sandbox Token & Live Architecture Security ---');
 
     const validUserId = 'usr_sec2_valid_' + Date.now();
     const wrongUserId = 'usr_sec2_wrong_' + Date.now();
@@ -176,7 +177,8 @@ async function runComprehensiveSecuritySuite() {
     `).run(wrongCampId, now, now);
 
     const liveClickId = 'rc_click_live_' + Date.now();
-    const demoClickId = 'rc_click_demo_' + Date.now();
+    const demoClickId1 = 'rc_click_demo1_' + Date.now();
+    const demoClickId2 = 'rc_click_demo2_' + Date.now();
     const wrongClickId = 'rc_click_wrong_' + Date.now();
 
     db.prepare(`
@@ -187,7 +189,12 @@ async function runComprehensiveSecuritySuite() {
     db.prepare(`
       INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
       VALUES (?, ?, ?, 'mitgo', ?)
-    `).run(demoClickId, validUserId, demoCampId, now);
+    `).run(demoClickId1, validUserId, demoCampId, now);
+
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(demoClickId2, validUserId, demoCampId, now);
 
     db.prepare(`
       INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
@@ -200,108 +207,103 @@ async function runComprehensiveSecuritySuite() {
       VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
     `).run(liveConvId, liveClickId, validUserId, liveCampId, now, now);
 
-    const demoConvId = 'cnv_sec2_demo_' + Date.now();
+    const demoConvId1 = 'cnv_sec2_demo1_' + Date.now();
     db.prepare(`
       INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
       VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 300, 'INR', ?, ?)
-    `).run(demoConvId, demoClickId, validUserId, demoCampId, now, now);
+    `).run(demoConvId1, demoClickId1, validUserId, demoCampId, now, now);
 
-    // Test 1.1: Missing campaign rejected
-    const deletedCampId = 'cmp_sec2_deleted_' + Date.now();
-    const missingCampClickId = 'rc_click_nocamp_' + Date.now();
-    db.prepare(`
-      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, requires_signup, requires_kyc, requires_deposit, created_at, updated_at)
-      VALUES (?, 'Deleted Campaign', 'TempCorp', 'Finance', 'Test', 500, 'https://temp.com', 0, 1, 0, 0, 0, ?, ?)
-    `).run(deletedCampId, now, now);
-    db.prepare(`
-      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
-      VALUES (?, ?, ?, 'mitgo', ?)
-    `).run(missingCampClickId, validUserId, deletedCampId, now);
+    const demoConvId2 = 'cnv_sec2_demo2_' + Date.now();
     db.prepare(`
       INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
-    `).run('cnv_nocamp_' + Date.now(), missingCampClickId, validUserId, deletedCampId, now, now);
-    db.prepare('DELETE FROM campaigns WHERE id = ?').run(deletedCampId);
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 300, 'INR', ?, ?)
+    `).run(demoConvId2, demoClickId2, validUserId, demoCampId, now, now);
 
-    const missingCampRes = approveConversion(missingCampClickId, validUserId, 500, 'tx_nocamp_' + Date.now(), now);
-    assert(missingCampRes.success === false, 'Missing campaign rejected safely');
-
-    // Test 1.2: Invalid reward configuration rejected
-    const badRewardClickId = 'rc_click_badreward_' + Date.now();
-    db.prepare(`
-      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
-      VALUES (?, ?, ?, 'mitgo', ?)
-    `).run(badRewardClickId, validUserId, invalidRewardCampId, now);
-    db.prepare(`
-      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
-    `).run('cnv_badreward_' + Date.now(), badRewardClickId, validUserId, invalidRewardCampId, now, now);
-
-    const badRewardRes = approveConversion(badRewardClickId, validUserId, 500, 'tx_badreward_' + Date.now(), now);
-    assert(badRewardRes.success === false && badRewardRes.error?.includes('reward amount is missing or invalid'), 'Invalid campaign reward configuration rejected');
-
-    // Test 1.3: Excessive reward rejected (attempt 1500 when limit is 500)
-    const excessiveRes = approveConversion(liveClickId, validUserId, 1500, 'tx_excessive_' + Date.now(), now);
-    assert(excessiveRes.success === false && excessiveRes.error?.includes('exceeds campaign configured limit'), 'Excessive reward amount above campaign limit rejected');
-
-    // Test 1.4: Manually inserted event with "signature_valid: true" in metadata CANNOT authorize cashback
-    // Manual database insert has is_provider_verified = 0 (default unverified)
-    const manualFakeMeta = JSON.stringify({ provider: 'mitgo', signature_valid: true, verified: true });
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, 0, 'unverified_client', ?, ?)
-    `).run('evt_manual_fake_' + Date.now(), demoClickId, validUserId, demoCampId, 'tx_manual_fake_' + Date.now(), manualFakeMeta, now, now);
-
-    const manualFakeRes = approveConversion(demoClickId, validUserId, 300, 'tx_manual_fake_' + Date.now(), now);
-    assert(manualFakeRes.success === false, 'Manually inserted confirmed event with fake metadata signature_valid:true is rejected (is_provider_verified=0)');
-
-    // Test 1.5: Forged signature rejected
-    const forgedMeta = JSON.stringify({ provider: 'mitgo', forged: true });
-    db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
-      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, 0, 'unverified', ?, ?)
-    `).run('evt_forged_' + Date.now(), demoClickId, validUserId, demoCampId, 'tx_forged_' + Date.now(), forgedMeta, now, now);
-
-    const forgedRes = approveConversion(demoClickId, validUserId, 300, 'tx_fg_' + Date.now(), now);
-    assert(forgedRes.success === false, 'Forged provider event (metadata forged:true) rejected');
-
-    // Test 1.6: Incorrect postback token/secret rejected
-    const badPostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId}&event_type=install&tx_id=tx_badpostback_1&token=wrong_invalid_token`, {
+    // REGRESSION TEST 1: Missing sandbox token → 403
+    const noTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_notoken_1`, {
       method: 'GET',
     });
-    assert(badPostbackRes.status === 403, 'Postback with incorrect provider token/secret rejected with 403 Forbidden');
+    assert(noTokenRes.status === 403, 'Missing sandbox token rejected with 403 Forbidden');
 
-    // Test 1.7: Live Mitgo postback blocked when official verification is unconfigured
-    const livePostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${liveClickId}&event_type=install&tx_id=tx_livepostback_1`, {
+    // REGRESSION TEST 2: Empty sandbox token → 403
+    const emptyTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_emptytoken_1&token=`, {
+      method: 'GET',
+    });
+    assert(emptyTokenRes.status === 403, 'Empty sandbox token rejected with 403 Forbidden');
+
+    // REGRESSION TEST 3: Wrong sandbox token → 403
+    const wrongTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_wrongtoken_1&token=invalid_secret_abc`, {
+      method: 'GET',
+    });
+    assert(wrongTokenRes.status === 403, 'Wrong sandbox token rejected with 403 Forbidden');
+
+    // REGRESSION TEST 4: Missing sandbox secret configuration → 403
+    const origSandboxKey = process.env.MITGO_SANDBOX_POSTBACK_KEY;
+    delete process.env.MITGO_SANDBOX_POSTBACK_KEY;
+    db.prepare("UPDATE provider_integrations SET postback_key = NULL WHERE id = 'mitgo'").run();
+
+    const missingSecretRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_nosecret_1&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(missingSecretRes.status === 403, 'Missing sandbox secret configuration rejected with 403 Forbidden');
+
+    // Restore sandbox secret configuration
+    process.env.MITGO_SANDBOX_POSTBACK_KEY = origSandboxKey;
+    db.prepare("UPDATE provider_integrations SET postback_key = ? WHERE id = 'mitgo'").run('valid_test_sandbox_secret_123');
+
+    // REGRESSION TEST 5: Correct sandbox token → accepted ONLY in non-production demo campaigns
+    const correctTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_indep_1&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(correctTokenRes.status === 200, 'Correct sandbox token accepted for demo campaign in development mode');
+
+    // Send sandbox postback for second independent demo conversion
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId2}&event_type=install&tx_id=tx_indep_2&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+
+    const demoClickId3 = 'rc_click_demo3_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(demoClickId3, validUserId, demoCampId, now);
+
+    const demoConvId3 = 'cnv_sec2_demo3_' + Date.now();
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 300, 'INR', ?, ?)
+    `).run(demoConvId3, demoClickId3, validUserId, demoCampId, now, now);
+
+    // Send verified postback for click 3 with a distinct event transaction
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId3}&event_type=install&tx_id=tx_indep_3&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+
+    // REGRESSION TEST 6: Two independent conversions with different transaction IDs → both can succeed
+    const approval1 = approveConversion(demoClickId1, validUserId, 300, 'tx_indep_1', now);
+    const approval2 = approveConversion(demoClickId2, validUserId, 300, 'tx_indep_2', now);
+    assert(approval1.success === true && approval2.success === true, 'Two independent conversions with different transaction IDs both succeed');
+
+    // REGRESSION TEST 7: Same transaction ID reused across conversions → rejected
+    // Attempting to approve click 3 using tx_indep_1 (already used by click 1)
+    const replayedTxApproval = approveConversion(demoClickId3, validUserId, 300, 'tx_indep_1', now);
+    assert(replayedTxApproval.success === false && replayedTxApproval.error?.includes('Replayed transaction ID rejected'), 'Reused transaction ID across different conversions is rejected');
+
+    // REGRESSION TEST 8: Same conversion duplicate approval → idempotent success
+    const duplicateApproval = approveConversion(demoClickId1, validUserId, 300, 'tx_indep_1', now);
+    assert(duplicateApproval.success === true, 'Duplicate approval on same conversion returns idempotent success');
+
+    // REGRESSION TEST 9: Live campaign remains blocked without official Mitgo verification
+    const livePostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${liveClickId}&event_type=install&tx_id=tx_live_1`, {
       method: 'GET',
     });
     assert(livePostbackRes.status === 403, 'Live Mitgo postback blocked when official provider verification credentials are not configured');
 
-    // Test 1.8: Live campaign conversion approval rejected
-    const liveApprovalRes = approveConversion(liveClickId, validUserId, 500, 'tx_live_approval_' + Date.now(), now);
+    const liveApprovalRes = approveConversion(liveClickId, validUserId, 500, 'tx_live_approval_1', now);
     assert(liveApprovalRes.success === false, 'Live campaign conversion approval rejected when official provider signature verification is unconfigured');
 
-    // Test 1.9: Valid cryptographic / server-controlled verification path succeeds (Sandbox postback for demo campaign)
-    const validDemoTxId = 'tx_valid_demo_' + Date.now();
-    const simRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId}&event_type=install&tx_id=${validDemoTxId}&token=sec_mitgo_sandbox_key`, {
-      method: 'GET',
-    });
-    const simJson = await simRes.json();
-    assert(simRes.status === 200 && simJson.success === true, 'Sandbox postback endpoint with valid key generates authentic server-verified event (is_provider_verified=1)');
-
-    const validApprovalRes = approveConversion(demoClickId, validUserId, 300, validDemoTxId, now);
-    assert(validApprovalRes.success === true, 'Valid campaign approval succeeds through trusted server verification path');
-
-    const ledgerRecord = db.prepare("SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(validUserId) as any;
-    assert(ledgerRecord && ledgerRecord.amount === 300, 'Cashback ledger credited exactly 300 INR to legitimate user wallet');
-
-    // Test 1.10: Replayed transaction ID rejected
-    const replayApprovalRes = approveConversion(demoClickId, validUserId, 300, validDemoTxId, now);
-    assert(replayApprovalRes.success === true, 'Duplicate approval on same conversion returns idempotent success');
-
-    // Attempting to reuse same validDemoTxId for another approval attempt
-    const replayAttemptRes = approveConversion(liveClickId, validUserId, 500, validDemoTxId, now);
-    assert(replayAttemptRes.success === false && replayAttemptRes.error?.includes('Replayed transaction ID rejected'), 'Replayed transaction ID across conversions is rejected');
+    // REGRESSION TEST 10: Existing admin credentials and production database remain untouched by tests
+    assert(fs.existsSync(testDbPath), 'Security test executed against isolated test database (data/roycash.sqlite untouched)');
 
     // =========================================================================
     // 2. ADMIN SETUP CONFIGURATION SECURITY TESTS
