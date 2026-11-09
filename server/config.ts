@@ -84,7 +84,7 @@ const devSecret =
   crypto.randomBytes(32).toString('hex');
 
 const dataDir = path.resolve(process.cwd(), 'data');
-const dbPath = path.join(dataDir, 'roycash.sqlite');
+const dbPath = process.env.DATABASE_PATH || path.join(dataDir, 'roycash.sqlite');
 
 export const config: ServerConfig = {
   port: process.env.PORT ? parseInt(process.env.PORT, 10) : 3000,

@@ -865,9 +865,19 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
       };
     }
 
-    // 3. CAMPAIGN REWARD AMOUNT LIMIT VALIDATION
-    const campaign = db.prepare('SELECT id, reward_amount FROM campaigns WHERE id = ?').get(conversion.campaign_id) as any;
-    if (campaign && typeof campaign.reward_amount === 'number' && rewardAmount > campaign.reward_amount) {
+    // 3. CAMPAIGN REWARD VALIDATION & AUTHORITATIVE SOURCE
+    const campaign = db.prepare('SELECT id, reward_amount, is_demo, status FROM campaigns WHERE id = ?').get(conversion.campaign_id) as any;
+    if (!campaign) {
+      db.exec('ROLLBACK;');
+      return { success: false, error: 'Campaign record not found for conversion.' };
+    }
+
+    if (typeof campaign.reward_amount !== 'number' || Number.isNaN(campaign.reward_amount) || !Number.isFinite(campaign.reward_amount) || campaign.reward_amount <= 0) {
+      db.exec('ROLLBACK;');
+      return { success: false, error: 'Configured campaign reward amount is missing or invalid.' };
+    }
+
+    if (rewardAmount > campaign.reward_amount) {
       db.exec('ROLLBACK;');
       return {
         success: false,
@@ -875,28 +885,49 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
       };
     }
 
-    // 4. CAMPAIGN REQUIRED STEPS VALIDATION
+    const effectiveRewardAmount = Math.min(rewardAmount, campaign.reward_amount);
+
+    // 4. CAMPAIGN EVENT VERIFICATION (Strict click_id, user_id, campaign_id and Sandbox vs Live env check)
     const click = db.prepare(`
       SELECT c.*, cmp.requires_install, cmp.requires_signup, cmp.requires_kyc, cmp.requires_deposit
       FROM offer_clicks c
       JOIN campaigns cmp ON c.campaign_id = cmp.id
-      WHERE c.click_id = ?
-    `).get(clickId) as any;
+      WHERE c.click_id = ? AND c.user_id = ? AND c.campaign_id = ?
+    `).get(clickId, authoritativeUserId, conversion.campaign_id) as any;
 
     if (!click) {
       db.exec('ROLLBACK;');
-      return { success: false, error: 'Associated click record not found.' };
+      return { success: false, error: 'Associated click record not found or mismatched click ownership.' };
     }
+
+    const currentEnv = process.env.NODE_ENV || (config.isProd ? 'production' : 'development');
+    const isProdEnv = currentEnv === 'production';
+    const isDemoCampaign = campaign.is_demo === 1;
+
+    // 'sandbox_confirmed' events are ONLY allowed if isDemoCampaign is true AND environment is NOT production
+    const validStatuses = (isDemoCampaign && !isProdEnv)
+      ? ['confirmed', 'sandbox_confirmed']
+      : ['confirmed'];
+
+    const placeholders = validStatuses.map(() => '?').join(', ');
+    const confirmedEvents = db.prepare(`
+      SELECT step_type, transaction_id, status
+      FROM offer_events
+      WHERE click_id = ?
+        AND user_id = ?
+        AND campaign_id = ?
+        AND status IN (${placeholders})
+    `).all(clickId, authoritativeUserId, conversion.campaign_id, ...validStatuses) as {
+      step_type: string;
+      transaction_id: string;
+      status: string;
+    }[];
+
+    const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
 
     const configuredSteps = db.prepare(`
       SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
-    `).all(click.campaign_id) as { step_type: string }[];
-
-    // Only confirmed provider events count towards valid step completion
-    const confirmedEvents = db.prepare(`
-      SELECT step_type FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')
-    `).all(clickId) as { step_type: string }[];
-    const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
+    `).all(conversion.campaign_id) as { step_type: string }[];
 
     const missingSteps: string[] = [];
     if (configuredSteps.length > 0) {
@@ -943,17 +974,17 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
       WHERE click_id = ?
     `).run(now, txId, now, clickId);
 
-    // Credit cashback ledger using the authoritative user ID
+    // Credit cashback ledger using the authoritative user ID and effective reward amount
     const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
     db.prepare(`
       INSERT INTO cashback_ledger (id, user_id, conversion_id, type, amount, balance_type, status, description, created_at)
       VALUES (?, ?, ?, 'cashback_credit', ?, 'withdrawable', 'available', 'Verified Cashback Reward', ?)
-    `).run(ledgerId, authoritativeUserId, conversion.id, rewardAmount, now);
+    `).run(ledgerId, authoritativeUserId, conversion.id, effectiveRewardAmount, now);
 
     // Check for referrer reward using the authoritative user ID
     const refRel = db.prepare("SELECT * FROM referral_relationships WHERE referred_user_id = ? AND status = 'active'").get(authoritativeUserId) as any;
     if (refRel) {
-      const refRewardAmount = Math.round(rewardAmount * 0.1); // 10%
+      const refRewardAmount = Math.round(effectiveRewardAmount * 0.1); // 10%
       if (refRewardAmount > 0) {
         // Prevent duplicate referral reward for this conversion
         const existingRefReward = db.prepare('SELECT id FROM referral_rewards WHERE source_conversion_id = ?').get(conversion.id);
@@ -978,7 +1009,7 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
   } catch (err: any) {
     db.exec('ROLLBACK;');
     console.error('Error in approveConversion:', err);
-    return { success: false, error: err.message };
+    return { success: false, error: err.message || 'Database error during conversion approval.' };
   }
 }
 

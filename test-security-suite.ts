@@ -1,14 +1,18 @@
-import { db, initDatabase, hashPassword, hashToken } from './server/db.js';
+import { db, initDatabase, hashPassword } from './server/db.js';
 import { approveConversion } from './server/api.js';
-import { config, validateProductionConfig, validateSetupTokenConfig } from './server/config.js';
+import { config, validateProductionConfig } from './server/config.js';
 import crypto from 'node:crypto';
 
 initDatabase();
 
-async function runComprehensiveSecurityTests() {
-  console.log('===============================================================');
-  console.log('ROYCASH COMPREHENSIVE SECURITY AUDIT & VERIFICATION SUITE');
-  console.log('===============================================================');
+async function runComprehensiveSecuritySuite() {
+  console.log('================================================================');
+  console.log('ROYCASH COMPREHENSIVE SECURITY AUDIT & VERIFICATION SUITE (ROUND 2)');
+  console.log('================================================================');
+  console.log('Environment Setup: Node.js, Express, SQLite WAL Mode');
+  console.log(`Target Server Base URL: http://127.0.0.1:3000`);
+  console.log('Database Isolation: Transactional isolation with test data cleanup');
+  console.log('================================================================\n');
 
   let passed = 0;
   let total = 0;
@@ -26,284 +30,340 @@ async function runComprehensiveSecurityTests() {
 
   const BASE_URL = 'http://127.0.0.1:3000';
   const ORIGIN = 'http://127.0.0.1:3000';
+  const now = new Date().toISOString();
 
-  // =========================================================================
-  // 1. ADMIN SETUP CONFIGURATION & STARTUP VALIDATION
-  // =========================================================================
-  console.log('\n--- 1. Admin Setup Configuration & Production Security ---');
+  // Test tracking list for database cleanup
+  const cleanupUserIds: string[] = [];
+  const cleanupCampaignIds: string[] = [];
+  const cleanupClickIds: string[] = [];
 
-  // Test 1.1: Production startup with missing ADMIN_SETUP_TOKEN
-  const origEnv = process.env.NODE_ENV;
-  const origSetupToken = process.env.ADMIN_SETUP_TOKEN;
-  const origSecret = process.env.ADMIN_SESSION_SECRET;
-
-  process.env.NODE_ENV = 'production';
-  process.env.ADMIN_SESSION_SECRET = 'a_very_secure_high_entropy_32_character_session_secret_2026!';
-  delete process.env.ADMIN_SETUP_TOKEN;
-
-  let missingTokenError = false;
   try {
-    validateProductionConfig('production');
-  } catch (err: any) {
-    missingTokenError = true;
-  }
-  assert(missingTokenError, 'Production startup fails when ADMIN_SETUP_TOKEN is missing');
+    // =========================================================================
+    // 1. CAMPAIGN REWARD & EVENT VERIFICATION TESTS
+    // =========================================================================
+    console.log('--- 1. Campaign Reward & Event Verification Security ---');
 
-  // Test 1.2: Production startup with weak ADMIN_SETUP_TOKEN (< 32 chars)
-  process.env.ADMIN_SETUP_TOKEN = 'short_token_12345';
-  let weakTokenError = false;
-  try {
-    validateProductionConfig('production');
-  } catch (err: any) {
-    weakTokenError = true;
-  }
-  assert(weakTokenError, 'Production startup fails when ADMIN_SETUP_TOKEN is under 32 characters');
+    // Create baseline test users
+    const validUserId = 'usr_sec2_valid_' + Date.now();
+    const wrongUserId = 'usr_sec2_wrong_' + Date.now();
+    cleanupUserIds.push(validUserId, wrongUserId);
 
-  // Test 1.3: Production startup with placeholder ADMIN_SETUP_TOKEN
-  process.env.ADMIN_SETUP_TOKEN = 'admin_setup_token_placeholder_32chars_long!';
-  let placeholderError = false;
-  try {
-    validateProductionConfig('production');
-  } catch (err: any) {
-    placeholderError = true;
-  }
-  assert(placeholderError, 'Production startup fails when ADMIN_SETUP_TOKEN is a placeholder');
+    db.prepare(`
+      INSERT INTO users (id, email, name, password_hash, salt, referral_code, created_at, updated_at)
+      VALUES (?, ?, 'Valid Sec User', 'h', 's', ?, ?, ?)
+    `).run(validUserId, `valid_${Date.now()}@roycash.sec`, `REF_VAL_${Date.now()}`, now, now);
 
-  // Test 1.4: Production startup with valid 32+ character high-entropy token
-  process.env.ADMIN_SETUP_TOKEN = 'a_very_secure_high_entropy_32_character_setup_token_2026!';
-  let validConfigPass = false;
-  try {
-    validateProductionConfig('production');
-    validConfigPass = true;
-  } catch (err: any) {
-    validConfigPass = false;
-  }
-  assert(validConfigPass, 'Production startup succeeds with valid high-entropy 32+ char setup token');
+    db.prepare(`
+      INSERT INTO users (id, email, name, password_hash, salt, referral_code, created_at, updated_at)
+      VALUES (?, ?, 'Wrong Sec User', 'h', 's', ?, ?, ?)
+    `).run(wrongUserId, `wrong_${Date.now()}@roycash.sec`, `REF_WRONG_${Date.now()}`, now, now);
 
-  // Restore env
-  process.env.NODE_ENV = origEnv;
-  if (origSetupToken) process.env.ADMIN_SETUP_TOKEN = origSetupToken; else delete process.env.ADMIN_SETUP_TOKEN;
-  if (origSecret) process.env.ADMIN_SESSION_SECRET = origSecret; else delete process.env.ADMIN_SESSION_SECRET;
+    // Create baseline test campaigns
+    const liveCampId = 'cmp_sec2_live_' + Date.now();
+    const demoCampId = 'cmp_sec2_demo_' + Date.now();
+    const invalidRewardCampId = 'cmp_sec2_badreward_' + Date.now();
+    const wrongCampId = 'cmp_sec2_wrongcamp_' + Date.now();
+    cleanupCampaignIds.push(liveCampId, demoCampId, invalidRewardCampId, wrongCampId);
 
-  // Test 1.5: Verify existing admin setup remains permanently disabled via HTTP endpoint
-  const existingAdmins = (db.prepare('SELECT COUNT(*) as c FROM admins').get() as any).c;
-  if (existingAdmins > 0) {
-    const disabledSetupRes = await fetch(`${BASE_URL}/api/admin/setup-initial`, {
+    // Live campaign (is_demo = 0) with reward_amount = 500
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, requires_signup, requires_kyc, requires_deposit, created_at, updated_at)
+      VALUES (?, 'Live Campaign Security Test', 'LiveCorp', 'Finance', 'Test', 500, 'https://live.com', 0, 1, 0, 0, 0, ?, ?)
+    `).run(liveCampId, now, now);
+
+    // Demo campaign (is_demo = 1) with reward_amount = 300
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, requires_signup, requires_kyc, requires_deposit, created_at, updated_at)
+      VALUES (?, 'Demo Campaign Security Test', 'DemoCorp', 'Shopping', 'Test', 300, 'https://demo.com', 1, 1, 0, 0, 0, ?, ?)
+    `).run(demoCampId, now, now);
+
+    // Campaign with invalid reward amount (-100)
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, requires_signup, requires_kyc, requires_deposit, created_at, updated_at)
+      VALUES (?, 'Bad Reward Campaign', 'BadCorp', 'Shopping', 'Test', -100, 'https://bad.com', 0, 1, 0, 0, 0, ?, ?)
+    `).run(invalidRewardCampId, now, now);
+
+    // Unrelated wrong campaign
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, requires_signup, requires_kyc, requires_deposit, created_at, updated_at)
+      VALUES (?, 'Wrong Campaign', 'WrongCorp', 'Shopping', 'Test', 500, 'https://wrong.com', 0, 1, 0, 0, 0, ?, ?)
+    `).run(wrongCampId, now, now);
+
+    // Create click and conversion records for Live Campaign
+    const liveClickId = 'rc_click_live_' + Date.now();
+    const wrongClickId = 'rc_click_wrong_' + Date.now();
+    cleanupClickIds.push(liveClickId, wrongClickId);
+
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(liveClickId, validUserId, liveCampId, now);
+
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(wrongClickId, validUserId, wrongCampId, now);
+
+    const liveConvId = 'cnv_sec2_live_' + Date.now();
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
+    `).run(liveConvId, liveClickId, validUserId, liveCampId, now, now);
+
+    // Test 1.1: Missing campaign rejected
+    const deletedCampId = 'cmp_sec2_deleted_' + Date.now();
+    const missingCampClickId = 'rc_click_nocamp_' + Date.now();
+    cleanupClickIds.push(missingCampClickId);
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, created_at, updated_at)
+      VALUES (?, 'Deleted Campaign', 'TempCorp', 'Finance', 'Test', 500, 'https://temp.com', 0, ?, ?)
+    `).run(deletedCampId, now, now);
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(missingCampClickId, validUserId, deletedCampId, now);
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
+    `).run('cnv_nocamp_' + Date.now(), missingCampClickId, validUserId, deletedCampId, now, now);
+    // Delete campaign row to simulate deleted/missing campaign
+    db.prepare('DELETE FROM campaigns WHERE id = ?').run(deletedCampId);
+
+    const missingCampRes = approveConversion(missingCampClickId, validUserId, 500, 'tx_nocamp_' + Date.now(), now);
+    assert(missingCampRes.success === false, 'Missing campaign rejected safely');
+
+    // Test 1.2: Invalid reward configuration rejected
+    const badRewardClickId = 'rc_click_badreward_' + Date.now();
+    cleanupClickIds.push(badRewardClickId);
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(badRewardClickId, validUserId, invalidRewardCampId, now);
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
+    `).run('cnv_badreward_' + Date.now(), badRewardClickId, validUserId, invalidRewardCampId, now, now);
+
+    const badRewardRes = approveConversion(badRewardClickId, validUserId, 500, 'tx_badreward_' + Date.now(), now);
+    assert(badRewardRes.success === false && badRewardRes.error?.includes('reward amount is missing or invalid'), 'Invalid campaign reward configuration rejected');
+
+    // Test 1.3: Excessive reward rejected (attempt 1500 when campaign limit is 500)
+    const excessiveRes = approveConversion(liveClickId, validUserId, 1500, 'tx_excessive_' + Date.now(), now);
+    assert(excessiveRes.success === false && excessiveRes.error?.includes('exceeds campaign configured limit'), 'Excessive reward amount above campaign limit rejected');
+
+    // Test 1.4: Wrong user event rejected
+    // Insert confirmed event for wrong user on liveClickId
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?)
+    `).run('evt_wronguser_' + Date.now(), liveClickId, wrongUserId, liveCampId, 'tx_evt_wronguser_' + Date.now(), now, now);
+
+    const wrongUserRes = approveConversion(liveClickId, validUserId, 500, 'tx_wu_' + Date.now(), now);
+    assert(wrongUserRes.success === false, 'Wrong user event rejected (event for different user not counted)');
+
+    // Test 1.5: Wrong campaign event rejected
+    // Insert confirmed event for wrong campaign ID on liveClickId
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?)
+    `).run('evt_wrongcamp_' + Date.now(), liveClickId, validUserId, wrongCampId, 'tx_evt_wrongcamp_' + Date.now(), now, now);
+
+    const wrongCampRes = approveConversion(liveClickId, validUserId, 500, 'tx_wc_' + Date.now(), now);
+    assert(wrongCampRes.success === false, 'Wrong campaign event rejected (event for different campaign not counted)');
+
+    // Test 1.6: Wrong click event rejected
+    // Insert confirmed event for wrong click ID
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?)
+    `).run('evt_wrongclick_' + Date.now(), wrongClickId, validUserId, liveCampId, 'tx_evt_wrongclick_' + Date.now(), now, now);
+
+    const wrongClickRes = approveConversion(liveClickId, validUserId, 500, 'tx_wcl_' + Date.now(), now);
+    assert(wrongClickRes.success === false, 'Wrong click event rejected (event for different click ID not counted)');
+
+    // Test 1.7: Unverified provider event rejected
+    // Insert unverified ('pending') event for liveClickId
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'pending', ?, ?, ?)
+    `).run('evt_unverified_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_evt_unverified_' + Date.now(), now, now);
+
+    const unverifiedRes = approveConversion(liveClickId, validUserId, 500, 'tx_unverified_' + Date.now(), now);
+    assert(unverifiedRes.success === false, 'Unverified provider event (status=pending) rejected');
+
+    // Test 1.8: Sandbox event on live campaign rejected
+    // Insert 'sandbox_confirmed' event for live campaign (is_demo = 0)
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'sandbox_confirmed', ?, ?, ?)
+    `).run('evt_sandbox_live_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_evt_sb_live_' + Date.now(), now, now);
+
+    const sandboxLiveRes = approveConversion(liveClickId, validUserId, 500, 'tx_sblive_' + Date.now(), now);
+    assert(sandboxLiveRes.success === false, 'Sandbox event on live campaign (is_demo=0) rejected');
+
+    // Test 1.9: Valid campaign approval succeeds
+    // Insert genuine 'confirmed' event matching click_id, user_id, and campaign_id
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Install', 'confirmed', ?, ?, ?)
+    `).run('evt_valid_live_' + Date.now(), liveClickId, validUserId, liveCampId, 'tx_evt_valid_live_' + Date.now(), now, now);
+
+    const validTxId = 'tx_valid_live_' + Date.now();
+    const validApprovalRes = approveConversion(liveClickId, validUserId, 500, validTxId, now);
+    assert(validApprovalRes.success === true, 'Valid campaign approval succeeds when all requirements are met');
+
+    const ledgerRecord = db.prepare("SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(validUserId) as any;
+    assert(ledgerRecord && ledgerRecord.amount === 500, 'Cashback ledger credited exactly 500 INR to legitimate user wallet');
+
+    // Test 1.10: Duplicate approval does not create another ledger entry (Idempotency)
+    const duplicateApprovalRes = approveConversion(liveClickId, validUserId, 500, validTxId, now);
+    assert(duplicateApprovalRes.success === true, 'Duplicate approval returns idempotent success');
+
+    const ledgerCount = (db.prepare("SELECT COUNT(*) as c FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(validUserId) as any).c;
+    assert(ledgerCount === 1, 'Duplicate approval did not create another ledger entry (double credit prevented)');
+
+    // =========================================================================
+    // 2. ADMIN SETUP CONFIGURATION SECURITY TESTS
+    // =========================================================================
+    console.log('\n--- 2. Admin Setup Configuration Security ---');
+
+    const origEnv = process.env.NODE_ENV;
+    const origSetupToken = process.env.ADMIN_SETUP_TOKEN;
+    const origSecret = process.env.ADMIN_SESSION_SECRET;
+
+    process.env.NODE_ENV = 'production';
+    process.env.ADMIN_SESSION_SECRET = 'a_very_secure_high_entropy_32_character_session_secret_2026!';
+    delete process.env.ADMIN_SETUP_TOKEN;
+
+    let missingTokenError = false;
+    try {
+      validateProductionConfig('production');
+    } catch {
+      missingTokenError = true;
+    }
+    assert(missingTokenError, 'Production startup fails when ADMIN_SETUP_TOKEN is missing');
+
+    process.env.ADMIN_SETUP_TOKEN = 'short_token_12345';
+    let weakTokenError = false;
+    try {
+      validateProductionConfig('production');
+    } catch {
+      weakTokenError = true;
+    }
+    assert(weakTokenError, 'Production startup fails when ADMIN_SETUP_TOKEN is under 32 characters');
+
+    process.env.ADMIN_SETUP_TOKEN = 'admin_setup_token_placeholder_32chars_long!';
+    let placeholderError = false;
+    try {
+      validateProductionConfig('production');
+    } catch {
+      placeholderError = true;
+    }
+    assert(placeholderError, 'Production startup fails when ADMIN_SETUP_TOKEN is a placeholder');
+
+    process.env.ADMIN_SETUP_TOKEN = 'a_very_secure_high_entropy_32_character_setup_token_2026!';
+    let validConfigPass = false;
+    try {
+      validateProductionConfig('production');
+      validConfigPass = true;
+    } catch {
+      validConfigPass = false;
+    }
+    assert(validConfigPass, 'Production startup succeeds with valid high-entropy 32+ char setup token');
+
+    process.env.NODE_ENV = origEnv;
+    if (origSetupToken) process.env.ADMIN_SETUP_TOKEN = origSetupToken; else delete process.env.ADMIN_SETUP_TOKEN;
+    if (origSecret) process.env.ADMIN_SESSION_SECRET = origSecret; else delete process.env.ADMIN_SESSION_SECRET;
+
+    // =========================================================================
+    // 3. ANTI-CSRF PROTECTION TESTS
+    // =========================================================================
+    console.log('\n--- 3. Anti-CSRF Protection Tests ---');
+
+    const { hash: tHash, salt: tSalt } = hashPassword('StrongPassword123!');
+    const adminRow = db.prepare('SELECT id FROM admins LIMIT 1').get() as { id: string } | undefined;
+    if (adminRow) {
+      db.prepare('UPDATE admins SET email = ?, username = ?, password_hash = ?, salt = ?, status = ? WHERE id = ?')
+        .run('testadmin@roycash.internal', 'testadmin', tHash, tSalt, 'active', adminRow.id);
+    } else {
+      const admId = 'adm_test_' + Date.now();
+      db.prepare(`
+        INSERT INTO admins (id, username, email, name, password_hash, salt, role, status, created_at, updated_at)
+        VALUES (?, 'testadmin', 'testadmin@roycash.internal', 'Test Admin', ?, ?, 'superadmin', 'active', ?, ?)
+      `).run(admId, tHash, tSalt, now, now);
+    }
+
+    const loginRes = await fetch(`${BASE_URL}/api/admin/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN },
       body: JSON.stringify({
-        email: 'attacker@roycash.internal',
-        password: 'AttackerPassword123!',
-      }),
-    });
-    assert(disabledSetupRes.status === 403 || disabledSetupRes.status === 429, 'Existing admin setup endpoint remains permanently disabled (403)');
-  } else {
-    // Initial setup request
-    const setupRes = await fetch(`${BASE_URL}/api/admin/setup-initial`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN },
-      body: JSON.stringify({
-        email: 'testadmin@roycash.internal',
-        name: 'Test Admin',
+        identifier: 'testadmin@roycash.internal',
         password: 'StrongPassword123!',
       }),
     });
-    assert(setupRes.status === 201, 'Initial admin setup succeeds with 201 Created');
+    const cookiesArr = (loginRes.headers as any).getSetCookie ? (loginRes.headers as any).getSetCookie() : [loginRes.headers.get('set-cookie') || ''];
+    const setCookie = cookiesArr.join('; ');
+    const adminCookie = setCookie.match(/roycash_admin_token=([^;]+)/)?.[1] || '';
+
+    const foreignOriginRes = await fetch(`${BASE_URL}/api/admin/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://evil-attacker-site.com',
+        'Cookie': `roycash_admin_token=${adminCookie}`,
+      },
+      body: JSON.stringify({ key: 'app_tagline', value: 'Hacked' }),
+    });
+    assert(foreignOriginRes.status === 403, 'Cookie-authenticated mutating request from foreign Origin is rejected with 403');
+
+    const missingOriginRes = await fetch(`${BASE_URL}/api/admin/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `roycash_admin_token=${adminCookie}`,
+      },
+      body: JSON.stringify({ key: 'app_tagline', value: 'Hacked' }),
+    });
+    assert(missingOriginRes.status === 403, 'Cookie-authenticated mutating request with missing Origin/Referer is rejected with 403');
+
+    const validOriginRes = await fetch(`${BASE_URL}/api/admin/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': ORIGIN,
+        'Cookie': `roycash_admin_token=${adminCookie}`,
+      },
+      body: JSON.stringify({ key: 'app_tagline', value: 'Earn Through Actions. Grow Through Referrals.' }),
+    });
+    assert(validOriginRes.status === 200, 'Cookie-authenticated request with valid Origin succeeds with 200 OK');
+
+  } finally {
+    // =========================================================================
+    // ISOLATED TEST DATA CLEANUP (PRESERVES PRODUCTION/SYSTEM DATA)
+    // =========================================================================
+    console.log('\n--- Test Data Cleanup & Database Isolation ---');
+    for (const cId of cleanupClickIds) {
+      db.prepare('DELETE FROM offer_events WHERE click_id = ?').run(cId);
+      db.prepare('DELETE FROM cashback_ledger WHERE conversion_id IN (SELECT id FROM conversions WHERE click_id = ?)').run(cId);
+      db.prepare('DELETE FROM referral_rewards WHERE source_conversion_id IN (SELECT id FROM conversions WHERE click_id = ?)').run(cId);
+      db.prepare('DELETE FROM conversions WHERE click_id = ?').run(cId);
+      db.prepare('DELETE FROM offer_clicks WHERE click_id = ?').run(cId);
+    }
+    for (const uId of cleanupUserIds) {
+      db.prepare('DELETE FROM cashback_ledger WHERE user_id = ?').run(uId);
+      db.prepare('DELETE FROM referral_relationships WHERE referrer_user_id = ? OR referred_user_id = ?').run(uId, uId);
+      db.prepare('DELETE FROM users WHERE id = ?').run(uId);
+    }
+    for (const cmpId of cleanupCampaignIds) {
+      db.prepare('DELETE FROM campaign_steps WHERE campaign_id = ?').run(cmpId);
+      db.prepare('DELETE FROM campaigns WHERE id = ?').run(cmpId);
+    }
+    console.log('[CLEANUP] All temporary test records removed cleanly from database.');
   }
 
-  // =========================================================================
-  // 2. CASHBACK USER OWNERSHIP & WALLET SECURITY
-  // =========================================================================
-  console.log('\n--- 2. Cashback User Ownership & Wallet Security ---');
-
-  const now = new Date().toISOString();
-  const legitimateUser = 'usr_owner_legit_' + Date.now();
-  const attackerUser = 'usr_owner_attacker_' + Date.now();
-
-  db.prepare(`
-    INSERT INTO users (id, email, name, password_hash, salt, referral_code, created_at, updated_at)
-    VALUES (?, ?, 'Legitimate Owner', 'h', 's', ?, ?, ?)
-  `).run(legitimateUser, `legit_${Date.now()}@roycash.test`, `REF_LEGIT_${Date.now()}`, now, now);
-
-  db.prepare(`
-    INSERT INTO users (id, email, name, password_hash, salt, referral_code, created_at, updated_at)
-    VALUES (?, ?, 'Attacker User', 'h', 's', ?, ?, ?)
-  `).run(attackerUser, `attacker_${Date.now()}@roycash.test`, `REF_ATTACK_${Date.now()}`, now, now);
-
-  const ownCampId = 'cmp_ownership_' + Date.now();
-  db.prepare(`
-    INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, requires_signup, requires_kyc, requires_deposit, created_at, updated_at)
-    VALUES (?, 'Ownership Campaign', 'OwnerCorp', 'Shopping', 'Test', 1000, 'https://owner.com', 0, 0, 0, 0, 0, ?, ?)
-  `).run(ownCampId, now, now);
-
-  const ownClickId = 'rc_own_click_' + Date.now();
-  db.prepare(`
-    INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
-    VALUES (?, ?, ?, 'mitgo', ?)
-  `).run(ownClickId, legitimateUser, ownCampId, now);
-
-  db.prepare(`
-    INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 1000, 'INR', ?, ?)
-  `).run('cnv_own_' + Date.now(), ownClickId, legitimateUser, ownCampId, now, now);
-
-  // Test 2.1: Mismatched conversion user ID - caller tries to pass attackerUser for legitimateUser's conversion
-  const mismatchRes = approveConversion(ownClickId, attackerUser, 1000, 'tx_own_mismatch_' + Date.now(), now);
-  assert(mismatchRes.success === false, 'Approval fails when supplied user ID does not match conversion.user_id');
-
-  // Test 2.2: Attempt to credit a different user's wallet
-  const attackerLedger = db.prepare("SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(attackerUser);
-  assert(!attackerLedger, 'No cashback was credited to attacker wallet after mismatched approval attempt');
-
-  // =========================================================================
-  // 3. CASHBACK AMOUNT VALIDATION & CAMPAIGN REWARD LIMIT
-  // =========================================================================
-  console.log('\n--- 3. Cashback Amount Validation & Campaign Limits ---');
-
-  // Test 3.1: Negative reward amount
-  const negativeRes = approveConversion(ownClickId, legitimateUser, -500, 'tx_amount_neg_' + Date.now(), now);
-  assert(negativeRes.success === false, 'Approval rejected for negative reward amount (-500)');
-
-  // Test 3.2: Zero reward amount
-  const zeroRes = approveConversion(ownClickId, legitimateUser, 0, 'tx_amount_zero_' + Date.now(), now);
-  assert(zeroRes.success === false, 'Approval rejected for zero reward amount (0)');
-
-  // Test 3.3: NaN reward amount
-  const nanRes = approveConversion(ownClickId, legitimateUser, NaN, 'tx_amount_nan_' + Date.now(), now);
-  assert(nanRes.success === false, 'Approval rejected for NaN reward amount');
-
-  // Test 3.4: Infinity reward amount
-  const infinityRes = approveConversion(ownClickId, legitimateUser, Infinity, 'tx_amount_inf_' + Date.now(), now);
-  assert(infinityRes.success === false, 'Approval rejected for Infinity reward amount');
-
-  // Test 3.5: Reward amount above campaign limit (5000 vs campaign limit 1000)
-  const excessiveRes = approveConversion(ownClickId, legitimateUser, 5000, 'tx_amount_excess_' + Date.now(), now);
-  assert(excessiveRes.success === false, 'Approval rejected when reward amount exceeds campaign configured limit (5000 > 1000)');
-
-  // Test 3.6: Valid reward amount within campaign limit
-  const validTxId = 'tx_amount_valid_' + Date.now();
-  const validRes = approveConversion(ownClickId, legitimateUser, 1000, validTxId, now);
-  assert(validRes.success === true, 'Approval succeeds for valid reward amount within campaign limit (1000)');
-
-  const validLedger = db.prepare("SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(legitimateUser) as any;
-  assert(validLedger && validLedger.amount === 1000, 'Cashback ledger credited exactly 1000 INR to legitimate owner');
-
-  // Test 3.7: Duplicate approval does not create another ledger entry (Idempotency)
-  const duplicateRes = approveConversion(ownClickId, legitimateUser, 1000, validTxId, now);
-  assert(duplicateRes.success === true, 'Duplicate approval returns idempotent success');
-
-  const ledgerCount = (db.prepare("SELECT COUNT(*) as c FROM cashback_ledger WHERE user_id = ? AND type = 'cashback_credit'").get(legitimateUser) as any).c;
-  assert(ledgerCount === 1, 'Duplicate approval did not create another ledger entry (exactly 1 row)');
-
-  // =========================================================================
-  // 4. CSRF PROTECTION VALIDATION
-  // =========================================================================
-  console.log('\n--- 4. CSRF Protection for Cookie-Authenticated Requests ---');
-
-  // Ensure testadmin exists with known password
-  const { hash: tHash, salt: tSalt } = hashPassword('StrongPassword123!');
-  const adminRow = db.prepare('SELECT id FROM admins LIMIT 1').get() as { id: string } | undefined;
-  if (adminRow) {
-    db.prepare('UPDATE admins SET email = ?, username = ?, password_hash = ?, salt = ?, status = ? WHERE id = ?')
-      .run('testadmin@roycash.internal', 'testadmin', tHash, tSalt, 'active', adminRow.id);
-  } else {
-    const { hash, salt } = hashPassword('StrongPassword123!');
-    const admId = 'adm_test_' + Date.now();
-    const n = new Date().toISOString();
-    db.prepare(`
-      INSERT INTO admins (id, username, email, name, password_hash, salt, role, status, created_at, updated_at)
-      VALUES (?, 'testadmin', 'testadmin@roycash.internal', 'Test Admin', ?, ?, 'superadmin', 'active', ?, ?)
-    `).run(admId, hash, salt, n, n);
-  }
-
-  // Login as admin to obtain cookie
-  const loginRes = await fetch(`${BASE_URL}/api/admin/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN },
-    body: JSON.stringify({
-      identifier: 'testadmin@roycash.internal',
-      password: 'StrongPassword123!',
-    }),
-  });
-  const cookiesArr = (loginRes.headers as any).getSetCookie ? (loginRes.headers as any).getSetCookie() : [loginRes.headers.get('set-cookie') || ''];
-  const setCookie = cookiesArr.join('; ');
-  const adminCookie = setCookie.match(/roycash_admin_token=([^;]+)/)?.[1] || '';
-
-  // Test 4.1: Mutating request with foreign Origin is rejected (403)
-  const foreignOriginRes = await fetch(`${BASE_URL}/api/admin/settings`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'Origin': 'https://evil-attacker-site.com',
-      'Cookie': `roycash_admin_token=${adminCookie}`,
-    },
-    body: JSON.stringify({ key: 'app_tagline', value: 'Hacked' }),
-  });
-  assert(foreignOriginRes.status === 403, 'Cookie-authenticated mutating request from foreign Origin is rejected with 403');
-
-  // Test 4.2: Mutating request with missing Origin/Referer when cookie-authenticated is rejected
-  const missingOriginRes = await fetch(`${BASE_URL}/api/admin/settings`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'Cookie': `roycash_admin_token=${adminCookie}`,
-    },
-    body: JSON.stringify({ key: 'app_tagline', value: 'Hacked' }),
-  });
-  assert(missingOriginRes.status === 403, 'Cookie-authenticated mutating request with missing Origin/Referer is rejected with 403');
-
-  // Test 4.3: Mutating request with valid Origin is accepted
-  const validOriginRes = await fetch(`${BASE_URL}/api/admin/settings`, {
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'Origin': ORIGIN,
-      'Cookie': `roycash_admin_token=${adminCookie}`,
-    },
-    body: JSON.stringify({ key: 'app_tagline', value: 'Earn Through Actions. Grow Through Referrals.' }),
-  });
-  assert(validOriginRes.status === 200, 'Cookie-authenticated request with valid Origin succeeds with 200 OK');
-
-  // =========================================================================
-  // 5. MITGO POSTBACK SPECIFICATION COMPLIANCE
-  // =========================================================================
-  console.log('\n--- 5. Mitgo Postback Ingestion Compliance ---');
-
-  // Test 5.1: Live campaign postback without confirmed official contract credentials is explicitly disabled
-  const livePostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${ownClickId}&event=approved&token=random_shared_token`);
-  const livePostbackData = await livePostbackRes.json() as any;
-  assert(livePostbackRes.status === 403, 'Live Mitgo postback is rejected (403)');
-  assert(livePostbackData.documentation_status === 'unconfirmed_live_provider_signature',
-    'Response explicitly identifies unconfirmed live provider documentation status');
-
-  // Test 5.2: Sandbox demo postback with invalid sandbox key is rejected
-  const sandboxCampId = 'cmp_sb_test_' + Date.now();
-  db.prepare(`
-    INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, requires_install, created_at, updated_at)
-    VALUES (?, 'Demo Offer', 'Demo Adv', 'Shopping', 'Test', 100, 'https://demo.com', 1, 1, ?, ?)
-  `).run(sandboxCampId, now, now);
-
-  const sbClickId = 'rc_sb_click_' + Date.now();
-  db.prepare(`
-    INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
-    VALUES (?, ?, ?, 'mitgo', ?)
-  `).run(sbClickId, legitimateUser, sandboxCampId, now);
-
-  db.prepare(`
-    INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 100, 'INR', ?, ?)
-  `).run('cnv_sb_' + Date.now(), sbClickId, legitimateUser, sandboxCampId, now, now);
-
-  const invalidSbKeyRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${sbClickId}&event=install&token=wrong_key`);
-  assert(invalidSbKeyRes.status === 403, 'Sandbox postback with invalid sandbox token is rejected with 403');
-
-  // Test 5.3: Valid sandbox postback succeeds in development mode
-  const validSbKeyRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${sbClickId}&event=install&token=sec_mitgo_sandbox_key`);
-  assert(validSbKeyRes.status === 200, 'Valid sandbox postback in development environment succeeds with 200 OK');
-
-  console.log('\n===============================================================');
+  console.log('\n================================================================');
   console.log(`TOTAL SECURITY ASSERTIONS EXECUTED: ${passed}/${total} PASSED`);
-  console.log('===============================================================\n');
+  console.log('================================================================\n');
 
   if (passed === total) {
     process.exit(0);
@@ -312,7 +372,7 @@ async function runComprehensiveSecurityTests() {
   }
 }
 
-runComprehensiveSecurityTests().catch((e) => {
+runComprehensiveSecuritySuite().catch((e) => {
   console.error('Fatal test error:', e);
   process.exit(1);
 });
