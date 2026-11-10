@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
-import { db, hashPassword, verifyPassword } from './db.js';
+import { db, hashPassword, verifyPassword, logAdminActivity } from './db.js';
 
 import { config } from './config.js';
 
@@ -1541,6 +1541,350 @@ apiRouter.get('/user/support/tickets', requireAuth, (req: AuthenticatedRequest, 
 /* ==========================================================================
    6. ADMIN PORTAL (SECURE MANAGEMENT)
    ========================================================================== */
+
+// Helper validation for campaign payload
+function validateCampaignPayload(body: any) {
+  if (!body || typeof body !== 'object') {
+    return { valid: false, error: 'Invalid campaign payload.' };
+  }
+
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  const advertiser_name = typeof body.advertiser_name === 'string' ? body.advertiser_name.trim() : '';
+  const category = typeof body.category === 'string' ? body.category.trim() : '';
+  const description = typeof body.description === 'string' ? body.description.trim() : '';
+  const tracking_url_template = typeof body.tracking_url_template === 'string' ? body.tracking_url_template.trim() : '';
+
+  if (!name) return { valid: false, error: 'Campaign Name is required.' };
+  if (!advertiser_name) return { valid: false, error: 'Advertiser Name is required.' };
+  if (!category) return { valid: false, error: 'Category is required.' };
+  if (!description) return { valid: false, error: 'Description is required.' };
+  if (!tracking_url_template) return { valid: false, error: 'Tracking URL Template is required.' };
+
+  const rawReward = parseFloat(String(body.reward_amount));
+  if (isNaN(rawReward) || !isFinite(rawReward) || rawReward <= 0) {
+    return { valid: false, error: 'Reward amount must be a positive number greater than 0.' };
+  }
+
+  const status = ['active', 'paused', 'draft'].includes(body.status) ? body.status : 'active';
+  const is_demo = body.is_demo === 0 || body.is_demo === '0' || body.is_demo === false ? 0 : 1;
+  const estimated_approval_days = Math.max(0, parseInt(String(body.estimated_approval_days || '30'), 10) || 30);
+  const minimum_deposit_amount = Math.max(0, parseFloat(String(body.minimum_deposit_amount || '0')) || 0);
+
+  const rawSteps = Array.isArray(body.steps) ? body.steps : [];
+  const steps = [];
+
+  for (let i = 0; i < rawSteps.length; i++) {
+    const s = rawSteps[i];
+    if (!s || typeof s !== 'object') continue;
+    const title = typeof s.title === 'string' ? s.title.trim() : '';
+    const desc = typeof s.description === 'string' ? s.description.trim() : '';
+    const stepType = typeof s.step_type === 'string' && s.step_type.trim() ? s.step_type.trim().toLowerCase() : 'other';
+
+    if (!title) return { valid: false, error: `Step #${i + 1} is missing a title.` };
+    if (!desc) return { valid: false, error: `Step #${i + 1} ('${title}') is missing a description.` };
+
+    steps.push({
+      step_order: i + 1,
+      step_type: stepType,
+      title,
+      description: desc,
+      is_required: s.is_required === 0 || s.is_required === '0' || s.is_required === false ? 0 : 1,
+      min_deposit_amount: Math.max(0, parseFloat(String(s.min_deposit_amount || '0')) || 0),
+    });
+  }
+
+  return {
+    valid: true,
+    data: {
+      name,
+      advertiser_name,
+      category,
+      description,
+      tracking_url_template,
+      reward_amount: rawReward,
+      currency: typeof body.currency === 'string' && body.currency.trim() ? body.currency.trim().toUpperCase() : 'INR',
+      provider: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim().toLowerCase() : 'mitgo',
+      provider_campaign_id: typeof body.provider_campaign_id === 'string' && body.provider_campaign_id.trim() ? body.provider_campaign_id.trim() : null,
+      logo_url: typeof body.logo_url === 'string' && body.logo_url.trim() ? body.logo_url.trim() : null,
+      terms: typeof body.terms === 'string' && body.terms.trim() ? body.terms.trim() : null,
+      estimated_approval_days,
+      is_demo,
+      status,
+      requires_install: body.requires_install ? 1 : 0,
+      requires_signup: body.requires_signup ? 1 : 0,
+      requires_kyc: body.requires_kyc ? 1 : 0,
+      requires_deposit: body.requires_deposit ? 1 : 0,
+      minimum_deposit_amount,
+      steps,
+    },
+  };
+}
+
+// 1. Get all campaigns for admin dashboard
+apiRouter.get('/admin/campaigns', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const campaigns = db.prepare(`
+      SELECT c.*,
+        (SELECT COUNT(*) FROM campaign_steps WHERE campaign_id = c.id) as step_count,
+        (SELECT COUNT(*) FROM offer_clicks WHERE campaign_id = c.id) as total_clicks,
+        (SELECT COUNT(*) FROM conversions WHERE campaign_id = c.id) as total_conversions
+      FROM campaigns c
+      ORDER BY c.created_at DESC
+    `).all();
+
+    return res.json({ success: true, campaigns });
+  } catch (err: any) {
+    console.error('Error fetching admin campaigns:', err);
+    return res.status(500).json({ success: false, error: 'Failed to fetch admin campaigns list.' });
+  }
+});
+
+// 2. Get single campaign with full dynamic steps
+apiRouter.get('/admin/campaigns/:id', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const campaignId = String(req.params.id);
+    const campaign = db.prepare('SELECT * FROM campaigns WHERE id = ?').get(campaignId) as any;
+    if (!campaign) {
+      return res.status(404).json({ success: false, error: 'Campaign not found.' });
+    }
+
+    const steps = db.prepare('SELECT * FROM campaign_steps WHERE campaign_id = ? ORDER BY step_order ASC').all(campaignId);
+
+    return res.json({ success: true, campaign: { ...campaign, steps } });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to fetch campaign details.' });
+  }
+});
+
+// 3. Create new campaign with dynamic steps (Transactional)
+apiRouter.post('/admin/campaigns', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const validation = validateCampaignPayload(req.body);
+    if (!validation.valid || !validation.data) {
+      return res.status(400).json({ success: false, error: validation.error });
+    }
+
+    const d = validation.data;
+    const campaignId = 'cmp_' + crypto.randomBytes(8).toString('hex');
+    const now = new Date().toISOString();
+    const adminId = (req as AuthenticatedRequest).admin?.id || null;
+
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare(`
+        INSERT INTO campaigns (
+          id, provider, provider_campaign_id, name, advertiser_name, category, logo_url,
+          description, terms, reward_amount, currency, tracking_url_template,
+          estimated_approval_days, is_demo, status, requires_install, requires_signup,
+          requires_kyc, requires_deposit, minimum_deposit_amount, created_at, updated_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?
+        )
+      `).run(
+        campaignId, d.provider, d.provider_campaign_id, d.name, d.advertiser_name, d.category, d.logo_url,
+        d.description, d.terms, d.reward_amount, d.currency, d.tracking_url_template,
+        d.estimated_approval_days, d.is_demo, d.status, d.requires_install, d.requires_signup,
+        d.requires_kyc, d.requires_deposit, d.minimum_deposit_amount, now, now
+      );
+
+      for (const step of d.steps) {
+        const stepId = 'step_' + crypto.randomBytes(8).toString('hex');
+        db.prepare(`
+          INSERT INTO campaign_steps (
+            id, campaign_id, step_order, step_type, title, description, is_required, min_deposit_amount, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(stepId, campaignId, step.step_order, step.step_type, step.title, step.description, step.is_required, step.min_deposit_amount, now);
+      }
+
+      db.exec('COMMIT;');
+    } catch (txErr) {
+      db.exec('ROLLBACK;');
+      throw txErr;
+    }
+
+    logAdminActivity(
+      adminId,
+      'CAMPAIGN_CREATED',
+      { campaign_id: campaignId, name: d.name, is_demo: d.is_demo, status: d.status, step_count: d.steps.length },
+      req.ip,
+      req.headers['user-agent'] as string
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: `Campaign '${d.name}' created successfully.`,
+      campaign_id: campaignId,
+    });
+  } catch (err: any) {
+    console.error('Error creating campaign:', err);
+    return res.status(500).json({ success: false, error: 'Failed to create campaign.' });
+  }
+});
+
+// 4. Update campaign with dynamic steps (Transactional)
+apiRouter.put('/admin/campaigns/:id', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const campaignId = String(req.params.id);
+    const existing = db.prepare('SELECT id FROM campaigns WHERE id = ?').get(campaignId);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Campaign not found.' });
+    }
+
+    const validation = validateCampaignPayload(req.body);
+    if (!validation.valid || !validation.data) {
+      return res.status(400).json({ success: false, error: validation.error });
+    }
+
+    const d = validation.data;
+    const now = new Date().toISOString();
+    const adminId = (req as AuthenticatedRequest).admin?.id || null;
+
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare(`
+        UPDATE campaigns SET
+          provider = ?, provider_campaign_id = ?, name = ?, advertiser_name = ?, category = ?, logo_url = ?,
+          description = ?, terms = ?, reward_amount = ?, currency = ?, tracking_url_template = ?,
+          estimated_approval_days = ?, is_demo = ?, status = ?, requires_install = ?, requires_signup = ?,
+          requires_kyc = ?, requires_deposit = ?, minimum_deposit_amount = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        d.provider, d.provider_campaign_id, d.name, d.advertiser_name, d.category, d.logo_url,
+        d.description, d.terms, d.reward_amount, d.currency, d.tracking_url_template,
+        d.estimated_approval_days, d.is_demo, d.status, d.requires_install, d.requires_signup,
+        d.requires_kyc, d.requires_deposit, d.minimum_deposit_amount, now,
+        campaignId
+      );
+
+      db.prepare('DELETE FROM campaign_steps WHERE campaign_id = ?').run(campaignId);
+
+      for (const step of d.steps) {
+        const stepId = 'step_' + crypto.randomBytes(8).toString('hex');
+        db.prepare(`
+          INSERT INTO campaign_steps (
+            id, campaign_id, step_order, step_type, title, description, is_required, min_deposit_amount, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(stepId, campaignId, step.step_order, step.step_type, step.title, step.description, step.is_required, step.min_deposit_amount, now);
+      }
+
+      db.exec('COMMIT;');
+    } catch (txErr) {
+      db.exec('ROLLBACK;');
+      throw txErr;
+    }
+
+    logAdminActivity(
+      adminId,
+      'CAMPAIGN_UPDATED',
+      { campaign_id: campaignId, name: d.name, is_demo: d.is_demo, status: d.status, step_count: d.steps.length },
+      req.ip,
+      req.headers['user-agent'] as string
+    );
+
+    return res.json({
+      success: true,
+      message: `Campaign '${d.name}' updated successfully.`,
+    });
+  } catch (err: any) {
+    console.error('Error updating campaign:', err);
+    return res.status(500).json({ success: false, error: 'Failed to update campaign.' });
+  }
+});
+
+// 5. Change campaign status (active, paused, draft)
+apiRouter.patch('/admin/campaigns/:id/status', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const campaignId = String(req.params.id);
+    const { status } = req.body;
+    if (!['active', 'paused', 'draft'].includes(status)) {
+      return res.status(400).json({ success: false, error: "Invalid status. Must be 'active', 'paused', or 'draft'." });
+    }
+
+    const campaign = db.prepare('SELECT id, name FROM campaigns WHERE id = ?').get(campaignId) as any;
+    if (!campaign) {
+      return res.status(404).json({ success: false, error: 'Campaign not found.' });
+    }
+
+    const now = new Date().toISOString();
+    db.prepare('UPDATE campaigns SET status = ?, updated_at = ? WHERE id = ?').run(status, now, campaignId);
+
+    const adminId = (req as AuthenticatedRequest).admin?.id || null;
+    logAdminActivity(
+      adminId,
+      'CAMPAIGN_STATUS_CHANGED',
+      { campaign_id: campaignId, name: campaign.name, new_status: status },
+      req.ip,
+      req.headers['user-agent'] as string
+    );
+
+    return res.json({
+      success: true,
+      message: `Campaign '${campaign.name}' status changed to '${status}'.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to update campaign status.' });
+  }
+});
+
+// 6. Delete campaign (or archive if active tracking history exists)
+apiRouter.delete('/admin/campaigns/:id', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const campaignId = String(req.params.id);
+    const campaign = db.prepare('SELECT id, name FROM campaigns WHERE id = ?').get(campaignId) as any;
+    if (!campaign) {
+      return res.status(404).json({ success: false, error: 'Campaign not found.' });
+    }
+
+    const adminId = (req as AuthenticatedRequest).admin?.id || null;
+    const clicksCount = (db.prepare('SELECT COUNT(*) as c FROM offer_clicks WHERE campaign_id = ?').get(campaignId) as any).c;
+    const conversionsCount = (db.prepare('SELECT COUNT(*) as c FROM conversions WHERE campaign_id = ?').get(campaignId) as any).c;
+
+    if (clicksCount > 0 || conversionsCount > 0) {
+      db.prepare("UPDATE campaigns SET status = 'draft', updated_at = ? WHERE id = ?").run(new Date().toISOString(), campaignId);
+      logAdminActivity(
+        adminId,
+        'CAMPAIGN_ARCHIVED',
+        { campaign_id: campaignId, name: campaign.name, reason: 'has_existing_tracking_history' },
+        req.ip,
+        req.headers['user-agent'] as string
+      );
+      return res.json({
+        success: true,
+        message: `Campaign '${campaign.name}' has existing click/conversion records, so it was set to 'Draft' to preserve tracking integrity.`,
+        archived: true,
+      });
+    }
+
+    db.exec('BEGIN IMMEDIATE;');
+    try {
+      db.prepare('DELETE FROM campaign_steps WHERE campaign_id = ?').run(campaignId);
+      db.prepare('DELETE FROM campaigns WHERE id = ?').run(campaignId);
+      db.exec('COMMIT;');
+    } catch (txErr) {
+      db.exec('ROLLBACK;');
+      throw txErr;
+    }
+
+    logAdminActivity(
+      adminId,
+      'CAMPAIGN_DELETED',
+      { campaign_id: campaignId, name: campaign.name },
+      req.ip,
+      req.headers['user-agent'] as string
+    );
+
+    return res.json({
+      success: true,
+      message: `Campaign '${campaign.name}' deleted successfully.`,
+      deleted: true,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to delete campaign.' });
+  }
+});
 
 apiRouter.get('/admin/metrics', requireAdmin, (req: Request, res: Response) => {
   try {

@@ -83,17 +83,15 @@ export const api = {
   submitTicket: (payload) => request('/user/support/ticket', { method: 'POST', body: JSON.stringify(payload) }),
   getTickets: () => request('/user/support/tickets'),
 
-  // Legacy/Future Admin Placeholders
-  getAdminMetrics: () => request('/admin/metrics'),
-  getAdminUsers: () => request('/admin/users'),
-  getAdminWithdrawals: () => request('/admin/withdrawals'),
-  updateWithdrawalStatus: (id, payload) =>
-    request(`/admin/withdrawals/${id}/status`, { method: 'PUT', body: JSON.stringify(payload) }),
-  getAdminTickets: () => request('/admin/tickets'),
-  updateAdminTicket: (id, payload) =>
-    request(`/admin/tickets/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
-  getAdminPostbackLogs: () => request('/admin/postback-logs'),
-  getAdminProviderStatus: () => request('/admin/provider-status'),
-  simulatePostback: (payload) =>
-    request('/admin/simulate-postback', { method: 'POST', body: JSON.stringify(payload) }),
+  // Admin Campaign Management
+  getAdminCampaigns: () => request('/admin/campaigns'),
+  getAdminCampaignById: (id) => request(`/admin/campaigns/${id}`),
+  createAdminCampaign: (payload) =>
+    request('/admin/campaigns', { method: 'POST', body: JSON.stringify(payload) }),
+  updateAdminCampaign: (id, payload) =>
+    request(`/admin/campaigns/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  updateAdminCampaignStatus: (id, status) =>
+    request(`/admin/campaigns/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  deleteAdminCampaign: (id) =>
+    request(`/admin/campaigns/${id}`, { method: 'DELETE' }),
 };

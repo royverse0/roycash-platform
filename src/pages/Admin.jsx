@@ -27,7 +27,22 @@ import {
   HelpCircle,
   Sliders,
   Save,
-  Check
+  Check,
+  Plus,
+  Trash2,
+  Edit,
+  Play,
+  Pause,
+  Eye,
+  ArrowUp,
+  ArrowDown,
+  Info,
+  Sparkles,
+  Copy,
+  Tag,
+  X,
+  Search,
+  Filter
 } from 'lucide-react';
 import { api } from '../services/api.js';
 
@@ -70,6 +85,59 @@ export default function Admin({ navigate }) {
   const [editTagline, setEditTagline] = useState('');
   const [editMaintenance, setEditMaintenance] = useState('false');
   const [savingSettings, setSavingSettings] = useState(false);
+
+  // Campaign Management State
+  const [campaignsList, setCampaignsList] = useState([]);
+  const [campaignSearch, setCampaignSearch] = useState('');
+  const [campaignStatusFilter, setCampaignStatusFilter] = useState('all');
+  const [campaignTypeFilter, setCampaignTypeFilter] = useState('all');
+  const [selectedCampaignForView, setSelectedCampaignForView] = useState(null);
+
+  // Campaign Form Modal / Slide-over State
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [editingCampaignId, setEditingCampaignId] = useState(null);
+  const [formSaving, setFormSaving] = useState(false);
+
+  // Campaign Form Fields
+  const [cName, setCName] = useState('');
+  const [cAdvertiser, setCAdvertiser] = useState('');
+  const [cCategory, setCCategory] = useState('Fintech');
+  const [cProvider, setCProvider] = useState('mitgo');
+  const [cProviderId, setCProviderId] = useState('');
+  const [cLogoUrl, setCLogoUrl] = useState('');
+  const [cDescription, setCDescription] = useState('');
+  const [cTerms, setCTerms] = useState('');
+  const [cRewardAmount, setCRewardAmount] = useState('300');
+  const [cCurrency, setCCurrency] = useState('INR');
+  const [cTrackingUrl, setCTrackingUrl] = useState('https://tracking.roycash.com/click?subid1={click_id}');
+  const [cApprovalDays, setCApprovalDays] = useState('30');
+  const [cIsDemo, setCIsDemo] = useState(1);
+  const [cStatus, setCStatus] = useState('active');
+  const [cReqInstall, setCReqInstall] = useState(true);
+  const [cReqSignup, setCReqSignup] = useState(true);
+  const [cReqKyc, setCReqKyc] = useState(false);
+  const [cReqDeposit, setCReqDeposit] = useState(false);
+  const [cMinDeposit, setCMinDeposit] = useState('0');
+
+  // Dynamic Steps Array
+  const [cSteps, setCSteps] = useState([
+    {
+      step_order: 1,
+      step_type: 'install',
+      title: 'Download & Install Application',
+      description: 'Install the official application on your mobile device using the tracking link.',
+      is_required: true,
+      min_deposit_amount: '0',
+    },
+    {
+      step_order: 2,
+      step_type: 'signup',
+      title: 'Complete Registration & Sign Up',
+      description: 'Register a new account with valid user details.',
+      is_required: true,
+      min_deposit_amount: '0',
+    },
+  ]);
 
   // Lockout countdown timer
   useEffect(() => {
@@ -122,6 +190,9 @@ export default function Admin({ navigate }) {
         ]);
         if (dashRes.success) setDashboardStatus(dashRes);
         if (logsRes.success) setActivityLogs(logsRes.logs || []);
+      } else if (tab === 'campaigns') {
+        const campRes = await api.getAdminCampaigns();
+        if (campRes.success) setCampaignsList(campRes.campaigns || []);
       } else if (tab === 'settings') {
         const setRes = await api.getAdminSettings();
         if (setRes.success) {
@@ -147,6 +218,258 @@ export default function Admin({ navigate }) {
     } finally {
       setIsRefreshing(false);
     }
+  };
+
+  // Campaign Handlers
+  const openCreateCampaignForm = () => {
+    setErrorMsg('');
+    setSuccessMsg('');
+    setEditingCampaignId(null);
+    setCName('');
+    setCAdvertiser('');
+    setCCategory('Fintech');
+    setCProvider('mitgo');
+    setCProviderId('');
+    setCLogoUrl('');
+    setCDescription('');
+    setCTerms('Standard network cashback terms apply. Artificial or bot traffic will lead to conversion rejection.');
+    setCRewardAmount('300');
+    setCCurrency('INR');
+    setCTrackingUrl('https://tracking.roycash.com/click?subid1={click_id}');
+    setCApprovalDays('30');
+    setCIsDemo(1);
+    setCStatus('active');
+    setCReqInstall(true);
+    setCReqSignup(true);
+    setCReqKyc(false);
+    setCReqDeposit(false);
+    setCMinDeposit('0');
+    setCSteps([
+      {
+        step_order: 1,
+        step_type: 'install',
+        title: 'Download & Install Application',
+        description: 'Install the official application on your mobile device using the tracking link.',
+        is_required: true,
+        min_deposit_amount: '0',
+      },
+      {
+        step_order: 2,
+        step_type: 'signup',
+        title: 'Complete Registration & Sign Up',
+        description: 'Register a new account with valid user details.',
+        is_required: true,
+        min_deposit_amount: '0',
+      },
+    ]);
+    setIsFormOpen(true);
+  };
+
+  const openEditCampaignForm = async (campaign) => {
+    setErrorMsg('');
+    setSuccessMsg('');
+    try {
+      setIsRefreshing(true);
+      const res = await api.getAdminCampaignById(campaign.id);
+      if (res.success && res.campaign) {
+        const c = res.campaign;
+        setEditingCampaignId(c.id);
+        setCName(c.name || '');
+        setCAdvertiser(c.advertiser_name || '');
+        setCCategory(c.category || 'Fintech');
+        setCProvider(c.provider || 'mitgo');
+        setCProviderId(c.provider_campaign_id || '');
+        setCLogoUrl(c.logo_url || '');
+        setCDescription(c.description || '');
+        setCTerms(c.terms || '');
+        setCRewardAmount(String(c.reward_amount || '300'));
+        setCCurrency(c.currency || 'INR');
+        setCTrackingUrl(c.tracking_url_template || '');
+        setCApprovalDays(String(c.estimated_approval_days || '30'));
+        setCIsDemo(c.is_demo);
+        setCStatus(c.status || 'active');
+        setCReqInstall(Boolean(c.requires_install));
+        setCReqSignup(Boolean(c.requires_signup));
+        setCReqKyc(Boolean(c.requires_kyc));
+        setCReqDeposit(Boolean(c.requires_deposit));
+        setCMinDeposit(String(c.minimum_deposit_amount || '0'));
+
+        if (Array.isArray(c.steps) && c.steps.length > 0) {
+          setCSteps(
+            c.steps.map((s, idx) => ({
+              step_order: idx + 1,
+              step_type: s.step_type || 'other',
+              title: s.title || '',
+              description: s.description || '',
+              is_required: Boolean(s.is_required),
+              min_deposit_amount: String(s.min_deposit_amount || '0'),
+            }))
+          );
+        } else {
+          setCSteps([]);
+        }
+
+        setIsFormOpen(true);
+      }
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to fetch campaign details for editing.');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const handleSaveCampaign = async (e) => {
+    e.preventDefault();
+    setErrorMsg('');
+    setSuccessMsg('');
+
+    if (!cName.trim()) { setErrorMsg('Campaign Name is required.'); return; }
+    if (!cAdvertiser.trim()) { setErrorMsg('Advertiser Name is required.'); return; }
+    if (!cCategory.trim()) { setErrorMsg('Category is required.'); return; }
+    if (!cDescription.trim()) { setErrorMsg('Description is required.'); return; }
+    if (!cTrackingUrl.trim()) { setErrorMsg('Tracking URL Template is required.'); return; }
+
+    const numReward = parseFloat(cRewardAmount);
+    if (isNaN(numReward) || !isFinite(numReward) || numReward <= 0) {
+      setErrorMsg('Reward amount must be a positive number greater than 0.');
+      return;
+    }
+
+    const formattedSteps = cSteps.map((s, idx) => ({
+      step_order: idx + 1,
+      step_type: s.step_type || 'other',
+      title: (s.title || '').trim(),
+      description: (s.description || '').trim(),
+      is_required: Boolean(s.is_required),
+      min_deposit_amount: parseFloat(s.min_deposit_amount) || 0,
+    }));
+
+    for (let i = 0; i < formattedSteps.length; i++) {
+      if (!formattedSteps[i].title) {
+        setErrorMsg(`Step #${i + 1} is missing a title.`);
+        return;
+      }
+      if (!formattedSteps[i].description) {
+        setErrorMsg(`Step #${i + 1} ('${formattedSteps[i].title}') is missing a description.`);
+        return;
+      }
+    }
+
+    const payload = {
+      name: cName.trim(),
+      advertiser_name: cAdvertiser.trim(),
+      category: cCategory.trim(),
+      provider: cProvider.trim(),
+      provider_campaign_id: cProviderId.trim() || null,
+      logo_url: cLogoUrl.trim() || null,
+      description: cDescription.trim(),
+      terms: cTerms.trim() || null,
+      reward_amount: numReward,
+      currency: cCurrency.trim().toUpperCase() || 'INR',
+      tracking_url_template: cTrackingUrl.trim(),
+      estimated_approval_days: parseInt(cApprovalDays, 10) || 30,
+      is_demo: Number(cIsDemo),
+      status: cStatus,
+      requires_install: cReqInstall ? 1 : 0,
+      requires_signup: cReqSignup ? 1 : 0,
+      requires_kyc: cReqKyc ? 1 : 0,
+      requires_deposit: cReqDeposit ? 1 : 0,
+      minimum_deposit_amount: parseFloat(cMinDeposit) || 0,
+      steps: formattedSteps,
+    };
+
+    try {
+      setFormSaving(true);
+      let res;
+      if (editingCampaignId) {
+        res = await api.updateAdminCampaign(editingCampaignId, payload);
+      } else {
+        res = await api.createAdminCampaign(payload);
+      }
+
+      if (res.success) {
+        setSuccessMsg(res.message || 'Campaign saved successfully.');
+        setIsFormOpen(false);
+        const campRes = await api.getAdminCampaigns();
+        if (campRes.success) setCampaignsList(campRes.campaigns || []);
+      }
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to save campaign.');
+    } finally {
+      setFormSaving(false);
+    }
+  };
+
+  const handleToggleStatus = async (campaign, newStatus) => {
+    try {
+      setErrorMsg('');
+      setSuccessMsg('');
+      const res = await api.updateAdminCampaignStatus(campaign.id, newStatus);
+      if (res.success) {
+        setSuccessMsg(res.message);
+        const campRes = await api.getAdminCampaigns();
+        if (campRes.success) setCampaignsList(campRes.campaigns || []);
+      }
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to update campaign status.');
+    }
+  };
+
+  const handleDeleteCampaign = async (campaign) => {
+    if (!window.confirm(`Are you sure you want to delete campaign '${campaign.name}'? If clicks or conversions exist, it will be set to Draft mode to preserve ledger history.`)) {
+      return;
+    }
+    try {
+      setErrorMsg('');
+      setSuccessMsg('');
+      const res = await api.deleteAdminCampaign(campaign.id);
+      if (res.success) {
+        setSuccessMsg(res.message);
+        const campRes = await api.getAdminCampaigns();
+        if (campRes.success) setCampaignsList(campRes.campaigns || []);
+      }
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to delete campaign.');
+    }
+  };
+
+  // Step Array Manipulation Helpers
+  const handleAddStep = () => {
+    setCSteps((prev) => [
+      ...prev,
+      {
+        step_order: prev.length + 1,
+        step_type: 'other',
+        title: '',
+        description: '',
+        is_required: true,
+        min_deposit_amount: '0',
+      },
+    ]);
+  };
+
+  const handleRemoveStep = (index) => {
+    setCSteps((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleStepChange = (index, field, value) => {
+    setCSteps((prev) => {
+      const next = [...prev];
+      next[index] = { ...next[index], [field]: value };
+      return next;
+    });
+  };
+
+  const handleMoveStep = (index, direction) => {
+    setCSteps((prev) => {
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= prev.length) return prev;
+      const next = [...prev];
+      const temp = next[index];
+      next[index] = next[targetIndex];
+      next[targetIndex] = temp;
+      return next;
+    });
   };
 
   // Handle Initial Superadmin Setup
@@ -296,7 +619,7 @@ export default function Admin({ navigate }) {
   // Navigation Items Specification (Exact 12 items requested)
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: Activity, status: 'active' },
-    { id: 'campaigns', label: 'Campaign Management', icon: Layers, status: 'coming_soon' },
+    { id: 'campaigns', label: 'Campaign Management', icon: Layers, status: 'active' },
     { id: 'mitgo', label: 'Mitgo Integration', icon: Radio, status: 'coming_soon' },
     { id: 'tracking', label: 'Conversion Tracking', icon: TrendingUp, status: 'coming_soon' },
     { id: 'users_wallets', label: 'Users & Wallets', icon: UserCheck, status: 'coming_soon' },
@@ -1081,8 +1404,951 @@ export default function Admin({ navigate }) {
           )}
 
           {/* ============================================================== */}
-          {/* TAB: SYSTEM SETTINGS (STEP 1 MILESTONE REAL DATA) */}
+          {/* TAB: CAMPAIGN MANAGEMENT & DYNAMIC STEPS CONFIGURATION */}
           {/* ============================================================== */}
+          {activeTab === 'campaigns' && (
+            <div>
+              {/* Header with Title and Create Button */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: '28px',
+                  flexWrap: 'wrap',
+                  gap: '16px',
+                }}
+              >
+                <div>
+                  <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#FFFFFF', letterSpacing: '-0.02em' }}>
+                    Campaign Management & Dynamic Steps
+                  </h1>
+                  <p style={{ color: 'var(--text-dim)', fontSize: '0.875rem', marginTop: '4px' }}>
+                    Create, edit, pause, and configure required verification steps for performance campaigns
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <button
+                    type="button"
+                    onClick={loadCampaigns}
+                    disabled={isRefreshing}
+                    className="btn btn-outline"
+                    style={{ padding: '10px 16px', fontSize: '0.85rem' }}
+                  >
+                    <RefreshCw size={14} className={isRefreshing ? 'spin' : ''} style={{ marginRight: '6px' }} />
+                    Refresh
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={openCreateCampaignForm}
+                    className="btn btn-primary"
+                    style={{ padding: '10px 20px', fontSize: '0.875rem' }}
+                  >
+                    <Plus size={16} style={{ marginRight: '6px' }} />
+                    Create New Campaign
+                  </button>
+                </div>
+              </div>
+
+              {/* KPI Banner */}
+              <div className="grid-4" style={{ gap: '16px', marginBottom: '24px' }}>
+                <div className="glass-card" style={{ padding: '16px 20px' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 700 }}>
+                    Total Campaigns
+                  </div>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#FFFFFF', marginTop: '4px' }}>
+                    {campaignsList.length}
+                  </div>
+                </div>
+
+                <div className="glass-card" style={{ padding: '16px 20px' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 700 }}>
+                    Active Offers
+                  </div>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--emerald-primary)', marginTop: '4px' }}>
+                    {campaignsList.filter((c) => c.status === 'active').length}
+                  </div>
+                </div>
+
+                <div className="glass-card" style={{ padding: '16px 20px' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 700 }}>
+                    Demo / Sandbox Offers
+                  </div>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, color: 'var(--gold-accent)', marginTop: '4px' }}>
+                    {campaignsList.filter((c) => c.is_demo === 1).length}
+                  </div>
+                </div>
+
+                <div className="glass-card" style={{ padding: '16px 20px' }}>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)', textTransform: 'uppercase', fontWeight: 700 }}>
+                    Live Provider Offers
+                  </div>
+                  <div style={{ fontSize: '1.5rem', fontWeight: 800, color: '#60A5FA', marginTop: '4px' }}>
+                    {campaignsList.filter((c) => c.is_demo === 0).length}
+                  </div>
+                </div>
+              </div>
+
+              {/* Search and Filters Bar */}
+              <div
+                className="glass-card"
+                style={{
+                  padding: '16px 20px',
+                  marginBottom: '24px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '16px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: '260px' }}>
+                  <Search size={18} style={{ color: 'var(--text-dim)' }} />
+                  <input
+                    type="text"
+                    value={campaignSearch}
+                    onChange={(e) => setCampaignSearch(e.target.value)}
+                    placeholder="Search by campaign, advertiser, category, provider ID..."
+                    className="contact-input"
+                    style={{ flex: 1, border: 'none', background: 'transparent', padding: '6px 0' }}
+                  />
+                  {campaignSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setCampaignSearch('')}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer' }}
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Filter size={14} style={{ color: 'var(--text-dim)' }} />
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Status:</span>
+                    <select
+                      value={campaignStatusFilter}
+                      onChange={(e) => setCampaignStatusFilter(e.target.value)}
+                      className="contact-input"
+                      style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+                    >
+                      <option value="all">All Statuses</option>
+                      <option value="active">Active</option>
+                      <option value="paused">Paused</option>
+                      <option value="draft">Draft</option>
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Environment:</span>
+                    <select
+                      value={campaignTypeFilter}
+                      onChange={(e) => setCampaignTypeFilter(e.target.value)}
+                      className="contact-input"
+                      style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+                    >
+                      <option value="all">All Environments</option>
+                      <option value="demo">Demo / Sandbox</option>
+                      <option value="live">Live Campaigns</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Campaigns Table */}
+              <div className="glass-card" style={{ padding: '0', overflow: 'hidden' }}>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85rem' }}>
+                    <thead>
+                      <tr style={{ background: 'rgba(255, 255, 255, 0.02)', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-dim)', fontSize: '0.75rem', textTransform: 'uppercase' }}>
+                        <th style={{ padding: '14px 18px' }}>Campaign & Advertiser</th>
+                        <th style={{ padding: '14px 18px' }}>Environment & Provider</th>
+                        <th style={{ padding: '14px 18px' }}>Reward & Approval</th>
+                        <th style={{ padding: '14px 18px' }}>Requirements & Steps</th>
+                        <th style={{ padding: '14px 18px' }}>Status</th>
+                        <th style={{ padding: '14px 18px', textAlign: 'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(() => {
+                        const filtered = campaignsList.filter((c) => {
+                          const matchesSearch =
+                            !campaignSearch ||
+                            c.name.toLowerCase().includes(campaignSearch.toLowerCase()) ||
+                            c.advertiser_name.toLowerCase().includes(campaignSearch.toLowerCase()) ||
+                            c.category.toLowerCase().includes(campaignSearch.toLowerCase()) ||
+                            (c.provider_campaign_id && c.provider_campaign_id.toLowerCase().includes(campaignSearch.toLowerCase()));
+
+                          const matchesStatus = campaignStatusFilter === 'all' || c.status === campaignStatusFilter;
+                          const matchesType =
+                            campaignTypeFilter === 'all' ||
+                            (campaignTypeFilter === 'demo' && c.is_demo === 1) ||
+                            (campaignTypeFilter === 'live' && c.is_demo === 0);
+
+                          return matchesSearch && matchesStatus && matchesType;
+                        });
+
+                        if (filtered.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={6} style={{ padding: '48px 18px', textAlign: 'center', color: 'var(--text-dim)' }}>
+                                No campaigns found matching the criteria. Click <strong>Create New Campaign</strong> above to add one.
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return filtered.map((c) => (
+                          <tr key={c.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                            {/* Name & Advertiser */}
+                            <td style={{ padding: '14px 18px' }}>
+                              <div style={{ fontWeight: 700, color: '#FFFFFF', fontSize: '0.9rem' }}>{c.name}</div>
+                              <div style={{ color: 'var(--text-dim)', fontSize: '0.78rem', marginTop: '2px' }}>
+                                {c.advertiser_name} · <span style={{ color: 'var(--emerald-light)' }}>{c.category}</span>
+                              </div>
+                            </td>
+
+                            {/* Environment & Provider */}
+                            <td style={{ padding: '14px 18px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                {c.is_demo === 1 ? (
+                                  <span className="badge badge-gold" style={{ fontSize: '0.68rem' }}>
+                                    DEMO / SANDBOX
+                                  </span>
+                                ) : (
+                                  <span className="badge" style={{ background: 'rgba(96, 165, 250, 0.15)', color: '#60A5FA', border: '1px solid rgba(96, 165, 250, 0.3)', fontSize: '0.68rem' }}>
+                                    LIVE CAMPAIGN
+                                  </span>
+                                )}
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+                                Provider: {c.provider} {c.provider_campaign_id ? `(${c.provider_campaign_id})` : ''}
+                              </div>
+                            </td>
+
+                            {/* Reward & Approval */}
+                            <td style={{ padding: '14px 18px' }}>
+                              <div style={{ fontWeight: 800, color: 'var(--emerald-primary)', fontSize: '0.95rem' }}>
+                                ₹{c.reward_amount} {c.currency}
+                              </div>
+                              <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', marginTop: '2px' }}>
+                                Est. Approval: {c.estimated_approval_days} Days
+                              </div>
+                            </td>
+
+                            {/* Steps & Requirements */}
+                            <td style={{ padding: '14px 18px' }}>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', maxWidth: '200px' }}>
+                                <span style={{ fontSize: '0.68rem', padding: '2px 6px', borderRadius: '4px', background: 'rgba(255, 255, 255, 0.05)', color: '#FFFFFF' }}>
+                                  {c.step_count || 0} Steps Configured
+                                </span>
+                                {Boolean(c.requires_install) && <span style={{ fontSize: '0.65rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(16, 185, 129, 0.1)', color: 'var(--emerald-light)' }}>Install</span>}
+                                {Boolean(c.requires_signup) && <span style={{ fontSize: '0.65rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(16, 185, 129, 0.1)', color: 'var(--emerald-light)' }}>Signup</span>}
+                                {Boolean(c.requires_kyc) && <span style={{ fontSize: '0.65rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(245, 158, 11, 0.1)', color: 'var(--gold-accent)' }}>KYC</span>}
+                                {Boolean(c.requires_deposit) && <span style={{ fontSize: '0.65rem', padding: '1px 5px', borderRadius: '3px', background: 'rgba(96, 165, 250, 0.1)', color: '#60A5FA' }}>Deposit (Min ₹{c.minimum_deposit_amount})</span>}
+                              </div>
+                            </td>
+
+                            {/* Status */}
+                            <td style={{ padding: '14px 18px' }}>
+                              {c.status === 'active' && (
+                                <span className="badge badge-emerald" style={{ fontSize: '0.7rem' }}>Active</span>
+                              )}
+                              {c.status === 'paused' && (
+                                <span className="badge badge-gold" style={{ fontSize: '0.7rem' }}>Paused</span>
+                              )}
+                              {c.status === 'draft' && (
+                                <span className="badge" style={{ background: 'rgba(255, 255, 255, 0.08)', color: 'var(--text-dim)', fontSize: '0.7rem' }}>Draft</span>
+                              )}
+                            </td>
+
+                            {/* Actions */}
+                            <td style={{ padding: '14px 18px', textAlign: 'right' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px' }}>
+                                <button
+                                  type="button"
+                                  title="View Campaign Steps & Details"
+                                  onClick={async () => {
+                                    const res = await api.getAdminCampaignById(c.id);
+                                    if (res.success) setSelectedCampaignForView(res.campaign);
+                                  }}
+                                  className="btn btn-outline"
+                                  style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                                >
+                                  <Eye size={14} />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  title="Edit Campaign & Steps"
+                                  onClick={() => openEditCampaignForm(c)}
+                                  className="btn btn-outline"
+                                  style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                                >
+                                  <Edit size={14} />
+                                </button>
+
+                                {c.status === 'active' ? (
+                                  <button
+                                    type="button"
+                                    title="Pause Campaign"
+                                    onClick={() => handleToggleStatus(c, 'paused')}
+                                    className="btn btn-outline"
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem', borderColor: 'rgba(245, 158, 11, 0.3)', color: 'var(--gold-accent)' }}
+                                  >
+                                    <Pause size={14} />
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    title="Activate Campaign"
+                                    onClick={() => handleToggleStatus(c, 'active')}
+                                    className="btn btn-outline"
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem', borderColor: 'var(--border-emerald)', color: 'var(--emerald-light)' }}
+                                  >
+                                    <Play size={14} />
+                                  </button>
+                                )}
+
+                                <button
+                                  type="button"
+                                  title="Delete or Archive Campaign"
+                                  onClick={() => handleDeleteCampaign(c)}
+                                  className="btn btn-outline"
+                                  style={{ padding: '6px 10px', fontSize: '0.75rem', borderColor: 'rgba(239, 68, 68, 0.3)', color: '#F87171' }}
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* MODAL 1: CREATE / EDIT CAMPAIGN & DYNAMIC STEPS BUILDER */}
+              {isFormOpen && (
+                <div
+                  style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    background: 'rgba(5, 8, 15, 0.85)',
+                    backdropFilter: 'blur(8px)',
+                    zIndex: 100,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '24px',
+                  }}
+                >
+                  <div
+                    className="glass-card"
+                    style={{
+                      width: '100%',
+                      maxWidth: '820px',
+                      maxHeight: '90vh',
+                      overflowY: 'auto',
+                      padding: '32px',
+                      border: '1px solid var(--border-emerald)',
+                      position: 'relative',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+                      <div>
+                        <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: '#FFFFFF' }}>
+                          {editingCampaignId ? 'Edit Campaign & Verification Steps' : 'Create Performance Campaign'}
+                        </h2>
+                        <p style={{ color: 'var(--text-dim)', fontSize: '0.825rem', marginTop: '2px' }}>
+                          Configure campaign parameters, tracking URL templates, and required conversion steps
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setIsFormOpen(false)}
+                        style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', padding: '6px' }}
+                      >
+                        <X size={20} />
+                      </button>
+                    </div>
+
+                    <form onSubmit={handleSaveCampaign}>
+                      {/* SECTION A: BASIC CAMPAIGN INFORMATION */}
+                      <div style={{ marginBottom: '24px', background: 'rgba(255, 255, 255, 0.02)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border-subtle)' }}>
+                        <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--emerald-light)', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <Tag size={16} /> Basic Offer Metadata
+                        </h3>
+
+                        <div className="grid-2" style={{ gap: '16px', marginBottom: '16px' }}>
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Campaign Name *</label>
+                            <input
+                              type="text"
+                              required
+                              value={cName}
+                              onChange={(e) => setCName(e.target.value)}
+                              placeholder="e.g. Kotak Mahindra 811 Savings Account"
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Advertiser Name *</label>
+                            <input
+                              type="text"
+                              required
+                              value={cAdvertiser}
+                              onChange={(e) => setCAdvertiser(e.target.value)}
+                              placeholder="e.g. Kotak Mahindra Bank"
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid-3" style={{ gap: '16px', marginBottom: '16px' }}>
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Category *</label>
+                            <select
+                              value={cCategory}
+                              onChange={(e) => setCCategory(e.target.value)}
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            >
+                              <option value="Banking">Banking</option>
+                              <option value="Fintech">Fintech</option>
+                              <option value="Trading">Trading & Investment</option>
+                              <option value="Crypto">Crypto</option>
+                              <option value="Gaming">Gaming & Skill</option>
+                              <option value="Shopping">Shopping & E-Commerce</option>
+                              <option value="Other">Other</option>
+                            </select>
+                          </div>
+
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Provider</label>
+                            <select
+                              value={cProvider}
+                              onChange={(e) => setCProvider(e.target.value)}
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            >
+                              <option value="mitgo">Mitgo Performance Network</option>
+                              <option value="internal">Internal Advertiser Direct</option>
+                            </select>
+                          </div>
+
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Provider Campaign ID</label>
+                            <input
+                              type="text"
+                              value={cProviderId}
+                              onChange={(e) => setCProviderId(e.target.value)}
+                              placeholder="e.g. mitgo_cmp_8829"
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                        </div>
+
+                        <div style={{ marginBottom: '16px' }}>
+                          <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Logo URL</label>
+                          <input
+                            type="text"
+                            value={cLogoUrl}
+                            onChange={(e) => setCLogoUrl(e.target.value)}
+                            placeholder="https://images.roycash.com/logos/kotak.png"
+                            className="contact-input"
+                            style={{ width: '100%' }}
+                          />
+                        </div>
+
+                        <div style={{ marginBottom: '16px' }}>
+                          <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Description *</label>
+                          <textarea
+                            required
+                            rows={3}
+                            value={cDescription}
+                            onChange={(e) => setCDescription(e.target.value)}
+                            placeholder="Briefly describe the campaign and user instructions..."
+                            className="contact-input"
+                            style={{ width: '100%', resize: 'vertical' }}
+                          />
+                        </div>
+
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Terms & Conditions</label>
+                          <textarea
+                            rows={2}
+                            value={cTerms}
+                            onChange={(e) => setCTerms(e.target.value)}
+                            placeholder="Specific offer restrictions, anti-fraud rules, or geographical constraints..."
+                            className="contact-input"
+                            style={{ width: '100%', resize: 'vertical' }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* SECTION B: PAYOUT & TRACKING URL CONFIGURATION */}
+                      <div style={{ marginBottom: '24px', background: 'rgba(255, 255, 255, 0.02)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border-subtle)' }}>
+                        <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--emerald-light)', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <TrendingUp size={16} /> Payout & Tracking URL Setup
+                        </h3>
+
+                        <div className="grid-3" style={{ gap: '16px', marginBottom: '16px' }}>
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Cashback Reward Amount *</label>
+                            <input
+                              type="number"
+                              required
+                              min="1"
+                              step="any"
+                              value={cRewardAmount}
+                              onChange={(e) => setCRewardAmount(e.target.value)}
+                              placeholder="300"
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Currency</label>
+                            <input
+                              type="text"
+                              required
+                              value={cCurrency}
+                              onChange={(e) => setCCurrency(e.target.value)}
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Estimated Approval Days</label>
+                            <input
+                              type="number"
+                              min="0"
+                              value={cApprovalDays}
+                              onChange={(e) => setCApprovalDays(e.target.value)}
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                            <label style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>Tracking URL Template *</label>
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                              <button
+                                type="button"
+                                onClick={() => setCTrackingUrl((prev) => prev + '{click_id}')}
+                                className="btn btn-outline"
+                                style={{ padding: '2px 6px', fontSize: '0.68rem' }}
+                              >
+                                + {'{click_id}'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setCTrackingUrl((prev) => prev + '{user_id}')}
+                                className="btn btn-outline"
+                                style={{ padding: '2px 6px', fontSize: '0.68rem' }}
+                              >
+                                + {'{user_id}'}
+                              </button>
+                            </div>
+                          </div>
+
+                          <input
+                            type="text"
+                            required
+                            value={cTrackingUrl}
+                            onChange={(e) => setCTrackingUrl(e.target.value)}
+                            placeholder="https://tracking.adnetwork.com/aff_c?offer_id=123&sub1={click_id}"
+                            className="contact-input"
+                            style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: '0.8rem' }}
+                          />
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: '4px', display: 'block' }}>
+                            RoyCash dynamically replaces <code>{'{click_id}'}</code> with the generated unique tracking session ID upon user click.
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* SECTION C: ENVIRONMENT MODE & STEP REQUIREMENT FLAGS */}
+                      <div style={{ marginBottom: '24px', background: 'rgba(255, 255, 255, 0.02)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border-subtle)' }}>
+                        <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--emerald-light)', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <ShieldCheck size={16} /> Environment Mode & Requirement Flags
+                        </h3>
+
+                        <div className="grid-2" style={{ gap: '16px', marginBottom: '16px' }}>
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Campaign Environment Mode *</label>
+                            <select
+                              value={cIsDemo}
+                              onChange={(e) => setCIsDemo(Number(e.target.value))}
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            >
+                              <option value={1}>Demo / Sandbox Campaign (Simulations Permitted)</option>
+                              <option value={0}>Live Advertiser Campaign (Requires S2S Postbacks)</option>
+                            </select>
+                            <span style={{ fontSize: '0.72rem', color: cIsDemo === 1 ? 'var(--gold-accent)' : '#60A5FA', marginTop: '4px', display: 'block' }}>
+                              {cIsDemo === 1
+                                ? 'Sandbox mode allows local testing and postback simulation.'
+                                : 'Live campaigns require authenticated advertiser postbacks.'}
+                            </span>
+                          </div>
+
+                          <div>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Initial Campaign Status</label>
+                            <select
+                              value={cStatus}
+                              onChange={(e) => setCStatus(e.target.value)}
+                              className="contact-input"
+                              style={{ width: '100%' }}
+                            >
+                              <option value="active">Active (Visible to Users)</option>
+                              <option value="paused">Paused (Hidden from Offer Wall)</option>
+                              <option value="draft">Draft (Internal Setup Only)</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        {/* Step Checkboxes */}
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '16px', padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: '#FFFFFF', cursor: 'pointer' }}>
+                            <input type="checkbox" checked={cReqInstall} onChange={(e) => setCReqInstall(e.target.checked)} />
+                            Requires App Install
+                          </label>
+
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: '#FFFFFF', cursor: 'pointer' }}>
+                            <input type="checkbox" checked={cReqSignup} onChange={(e) => setCReqSignup(e.target.checked)} />
+                            Requires Sign Up / Registration
+                          </label>
+
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: '#FFFFFF', cursor: 'pointer' }}>
+                            <input type="checkbox" checked={cReqKyc} onChange={(e) => setCReqKyc(e.target.checked)} />
+                            Requires KYC Verification
+                          </label>
+
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem', color: '#FFFFFF', cursor: 'pointer' }}>
+                            <input type="checkbox" checked={cReqDeposit} onChange={(e) => setCReqDeposit(e.target.checked)} />
+                            Requires Deposit / First Trade
+                          </label>
+                        </div>
+
+                        {cReqDeposit && (
+                          <div style={{ marginTop: '12px' }}>
+                            <label style={{ display: 'block', fontSize: '0.78rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Minimum Deposit Amount (₹)</label>
+                            <input
+                              type="number"
+                              min="0"
+                              value={cMinDeposit}
+                              onChange={(e) => setCMinDeposit(e.target.value)}
+                              className="contact-input"
+                              style={{ width: '200px' }}
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* SECTION D: DYNAMIC CAMPAIGN STEPS BUILDER */}
+                      <div style={{ marginBottom: '28px', background: 'rgba(255, 255, 255, 0.02)', padding: '20px', borderRadius: '10px', border: '1px solid var(--border-subtle)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+                          <div>
+                            <h3 style={{ fontSize: '0.95rem', fontWeight: 700, color: 'var(--emerald-light)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <Layers size={16} /> Dynamic Campaign Verification Steps ({cSteps.length})
+                            </h3>
+                            <p style={{ color: 'var(--text-dim)', fontSize: '0.75rem', marginTop: '2px' }}>
+                              Sequence of user actions verified before cashback financial approval
+                            </p>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={handleAddStep}
+                            className="btn btn-outline"
+                            style={{ padding: '6px 12px', fontSize: '0.78rem' }}
+                          >
+                            <Plus size={14} style={{ marginRight: '4px' }} />
+                            Add Step
+                          </button>
+                        </div>
+
+                        {cSteps.length === 0 ? (
+                          <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-dim)', fontSize: '0.825rem' }}>
+                            No verification steps configured. Click <strong>Add Step</strong> to define required user actions.
+                          </div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                            {cSteps.map((step, idx) => (
+                              <div
+                                key={idx}
+                                style={{
+                                  padding: '16px',
+                                  background: 'rgba(0, 0, 0, 0.3)',
+                                  borderRadius: '8px',
+                                  border: '1px solid var(--border-subtle)',
+                                }}
+                              >
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                                  <span className="badge badge-emerald" style={{ fontSize: '0.68rem' }}>
+                                    Step #{idx + 1}
+                                  </span>
+
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <button
+                                      type="button"
+                                      disabled={idx === 0}
+                                      onClick={() => handleMoveStep(idx, 'up')}
+                                      className="btn btn-outline"
+                                      style={{ padding: '2px 6px', opacity: idx === 0 ? 0.3 : 1 }}
+                                    >
+                                      <ArrowUp size={12} />
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={idx === cSteps.length - 1}
+                                      onClick={() => handleMoveStep(idx, 'down')}
+                                      className="btn btn-outline"
+                                      style={{ padding: '2px 6px', opacity: idx === cSteps.length - 1 ? 0.3 : 1 }}
+                                    >
+                                      <ArrowDown size={12} />
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveStep(idx)}
+                                      className="btn btn-outline"
+                                      style={{ padding: '2px 6px', borderColor: 'rgba(239, 68, 68, 0.3)', color: '#F87171' }}
+                                    >
+                                      <Trash2 size={12} />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="grid-2" style={{ gap: '12px', marginBottom: '10px' }}>
+                                  <div>
+                                    <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '2px' }}>Step Title *</label>
+                                    <input
+                                      type="text"
+                                      required
+                                      value={step.title}
+                                      onChange={(e) => handleStepChange(idx, 'title', e.target.value)}
+                                      placeholder="e.g. KYC Identity Verification"
+                                      className="contact-input"
+                                      style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem' }}
+                                    />
+                                  </div>
+
+                                  <div>
+                                    <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '2px' }}>Step Event Type</label>
+                                    <select
+                                      value={step.step_type}
+                                      onChange={(e) => handleStepChange(idx, 'step_type', e.target.value)}
+                                      className="contact-input"
+                                      style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem' }}
+                                    >
+                                      <option value="install">install (App Installation)</option>
+                                      <option value="signup">signup (Account Registration)</option>
+                                      <option value="kyc">kyc (Identity Verification)</option>
+                                      <option value="deposit">deposit (Deposit / First Trade)</option>
+                                      <option value="trade">trade (Trading / Action)</option>
+                                      <option value="other">other (Custom Action)</option>
+                                    </select>
+                                  </div>
+                                </div>
+
+                                <div style={{ marginBottom: '10px' }}>
+                                  <label style={{ display: 'block', fontSize: '0.72rem', color: 'var(--text-secondary)', marginBottom: '2px' }}>Step User Instructions *</label>
+                                  <input
+                                    type="text"
+                                    required
+                                    value={step.description}
+                                    onChange={(e) => handleStepChange(idx, 'description', e.target.value)}
+                                    placeholder="e.g. Upload Aadhaar/PAN to complete instant KYC."
+                                    className="contact-input"
+                                    style={{ width: '100%', padding: '6px 10px', fontSize: '0.8rem' }}
+                                  />
+                                </div>
+
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+                                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={Boolean(step.is_required)}
+                                      onChange={(e) => handleStepChange(idx, 'is_required', e.target.checked)}
+                                    />
+                                    Mandatory Step for Conversion Approval
+                                  </label>
+
+                                  {step.step_type === 'deposit' && (
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                      <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>Min Deposit:</span>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        value={step.min_deposit_amount}
+                                        onChange={(e) => handleStepChange(idx, 'min_deposit_amount', e.target.value)}
+                                        className="contact-input"
+                                        style={{ width: '100px', padding: '4px 8px', fontSize: '0.75rem' }}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Modal Footer Controls */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '12px' }}>
+                        <button
+                          type="button"
+                          onClick={() => setIsFormOpen(false)}
+                          disabled={formSaving}
+                          className="btn btn-outline"
+                          style={{ padding: '10px 20px' }}
+                        >
+                          Cancel
+                        </button>
+
+                        <button
+                          type="submit"
+                          disabled={formSaving}
+                          className="btn btn-primary"
+                          style={{ padding: '10px 24px' }}
+                        >
+                          <Save size={16} style={{ marginRight: '6px' }} />
+                          {formSaving ? 'Saving Campaign...' : editingCampaignId ? 'Update Campaign' : 'Create Campaign'}
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {/* MODAL 2: VIEW CAMPAIGN STEPS & DETAILS DRAWER */}
+              {selectedCampaignForView && (
+                <div
+                  style={{
+                    position: 'fixed',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    background: 'rgba(5, 8, 15, 0.85)',
+                    backdropFilter: 'blur(8px)',
+                    zIndex: 100,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    padding: '24px',
+                  }}
+                >
+                  <div
+                    className="glass-card"
+                    style={{
+                      width: '100%',
+                      maxWidth: '680px',
+                      maxHeight: '85vh',
+                      overflowY: 'auto',
+                      padding: '32px',
+                      border: '1px solid var(--border-medium)',
+                      position: 'relative',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div>
+                          <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: '#FFFFFF' }}>{selectedCampaignForView.name}</h2>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--text-dim)', marginTop: '2px' }}>
+                            {selectedCampaignForView.advertiser_name} · {selectedCampaignForView.category}
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCampaignForView(null)}
+                        style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer' }}
+                      >
+                        <X size={20} />
+                      </button>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+                      {selectedCampaignForView.is_demo === 1 ? (
+                        <span className="badge badge-gold">DEMO / SANDBOX</span>
+                      ) : (
+                        <span className="badge" style={{ background: 'rgba(96, 165, 250, 0.15)', color: '#60A5FA' }}>LIVE CAMPAIGN</span>
+                      )}
+                      <span className="badge badge-emerald">Reward: ₹{selectedCampaignForView.reward_amount} {selectedCampaignForView.currency}</span>
+                      <span className="badge" style={{ background: 'rgba(255,255,255,0.05)', color: '#FFFFFF' }}>Status: {selectedCampaignForView.status}</span>
+                    </div>
+
+                    <div style={{ marginBottom: '20px', padding: '16px', background: 'rgba(255,255,255,0.02)', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
+                      <h4 style={{ fontSize: '0.85rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '6px' }}>Tracking Template</h4>
+                      <code style={{ fontSize: '0.8rem', color: 'var(--emerald-light)', wordBreak: 'break-all' }}>
+                        {selectedCampaignForView.tracking_url_template}
+                      </code>
+                    </div>
+
+                    <div style={{ marginBottom: '24px' }}>
+                      <h4 style={{ fontSize: '0.9rem', fontWeight: 700, color: '#FFFFFF', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <Layers size={16} /> Configured Verification Steps ({selectedCampaignForView.steps?.length || 0})
+                      </h4>
+
+                      {(!selectedCampaignForView.steps || selectedCampaignForView.steps.length === 0) ? (
+                        <div style={{ color: 'var(--text-dim)', fontSize: '0.825rem' }}>No dynamic steps configured for this offer.</div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                          {selectedCampaignForView.steps.map((step, idx) => (
+                            <div key={step.id || idx} style={{ padding: '12px 14px', background: 'rgba(0,0,0,0.2)', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                                <span style={{ fontWeight: 700, color: 'var(--emerald-light)', fontSize: '0.85rem' }}>
+                                  Step #{step.step_order}: {step.title}
+                                </span>
+                                <span className="badge" style={{ fontSize: '0.65rem', background: 'rgba(255,255,255,0.05)', color: 'var(--text-dim)' }}>
+                                  Type: {step.step_type}
+                                </span>
+                              </div>
+                              <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0 }}>
+                                {step.description}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ textAlign: 'right' }}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCampaignForView(null)}
+                        className="btn btn-outline"
+                        style={{ padding: '8px 18px' }}
+                      >
+                        Close Details
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {activeTab === 'settings' && (
             <div>
               <div style={{ marginBottom: '28px' }}>
