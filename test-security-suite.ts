@@ -1115,6 +1115,28 @@ async function runComprehensiveSecuritySuite() {
     });
     assert(duplicateUtrRes.status === 400, 'M1.3-17: Reusing an existing payment reference (UTR) is rejected with 400');
 
+    // Test two matching debit holds for one withdrawal (should fail rejection)
+    const twoHoldsWdrId = 'wdr_two_holds_' + Date.now();
+    db.prepare(`
+      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "twoholds@paytm"}', 'pending', ?)
+    `).run(twoHoldsWdrId, wdrTestUserId, 150, now);
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'withdrawal_debit', 150, 'withdrawable', 'deducted', 'Hold 1', ?)
+    `).run('ldg_h1_' + Date.now(), wdrTestUserId, twoHoldsWdrId, now);
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'withdrawal_debit', 150, 'withdrawable', 'deducted', 'Hold 2', ?)
+    `).run('ldg_h2_' + Date.now(), wdrTestUserId, twoHoldsWdrId, now);
+
+    const twoHoldsRejRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${twoHoldsWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'rejected', rejection_reason: 'Two holds test' }),
+    });
+    assert(twoHoldsRejRes.status === 400, 'M1.3-18: Rejection with two matching debit holds is rejected with 400');
+
     const rejectWdrId = 'wdr_reject_' + Date.now();
     db.prepare(`
       INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
@@ -1154,7 +1176,7 @@ async function runComprehensiveSecuritySuite() {
       SELECT COALESCE(SUM(CASE WHEN status = 'available' THEN amount ELSE -amount END), 0) as bal
       FROM cashback_ledger WHERE user_id = ? AND balance_type = 'withdrawable'
     `).get(wdrTestUserId) as any).bal;
-    assert(userLedgerSum === 300, 'M1.3-14: Exact wallet balance calculation is correct after transitions (1000 initial - 500 paid - 300 held - 100 hold - 100 hold2 + 300 refunded = 300)');
+    assert(userLedgerSum === 0, 'M1.3-14: Exact wallet balance calculation is correct after transitions (0)');
 
   } finally {
     // =========================================================================

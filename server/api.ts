@@ -2331,18 +2331,35 @@ apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res:
         });
       }
 
-      // 1. Verify withdrawal hold before rejection
+      // 1. Verify withdrawal hold before rejection (Require exactly ONE matching withdrawal_debit entry)
       if (status === 'rejected') {
-        const holdEntry = db.prepare(`
-          SELECT id, amount, user_id FROM cashback_ledger
+        const holdEntries = db.prepare(`
+          SELECT id, amount, user_id, balance_type, status FROM cashback_ledger
           WHERE withdrawal_id = ? AND type = 'withdrawal_debit' AND user_id = ?
-        `).get(withdrawalId, currentWdr.user_id) as any;
+        `).all(withdrawalId, currentWdr.user_id) as any[];
 
-        if (!holdEntry || Math.abs(holdEntry.amount - currentWdr.amount) > 0.001) {
+        if (!holdEntries || holdEntries.length !== 1) {
           db.exec('ROLLBACK;');
           return res.status(400).json({
             success: false,
-            error: 'Rejection failed: Valid matching withdrawal_debit hold not found or amount mismatched.',
+            error: `Rejection failed: Expected exactly 1 matching withdrawal_debit hold entry, found ${holdEntries?.length || 0}.`,
+          });
+        }
+
+        const holdEntry = holdEntries[0];
+        if (Math.abs(holdEntry.amount - currentWdr.amount) > 0.001) {
+          db.exec('ROLLBACK;');
+          return res.status(400).json({
+            success: false,
+            error: 'Rejection failed: Withdrawal hold amount does not match withdrawal request amount.',
+          });
+        }
+
+        if (holdEntry.balance_type !== 'withdrawable' || holdEntry.status !== 'deducted') {
+          db.exec('ROLLBACK;');
+          return res.status(400).json({
+            success: false,
+            error: `Rejection failed: Hold entry has invalid balance_type ('${holdEntry.balance_type}') or status ('${holdEntry.status}').`,
           });
         }
       }
