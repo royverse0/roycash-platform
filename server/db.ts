@@ -395,19 +395,69 @@ export function initDatabase() {
     // Column already exists
   }
   try {
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_refund_withdrawal ON cashback_ledger(withdrawal_id) WHERE type = 'admin_adjustment';`);
-  } catch {
-    // Index already exists
-  }
-  try {
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_withdrawal_reference_unique ON withdrawal_requests(reference_id) WHERE reference_id IS NOT NULL AND reference_id != '';`);
-  } catch {
-    // Index already exists
-  }
-  try {
+    const dupDebits = db.prepare(`
+      SELECT withdrawal_id, COUNT(*) as cnt
+      FROM cashback_ledger
+      WHERE type = 'withdrawal_debit' AND withdrawal_id IS NOT NULL
+      GROUP BY withdrawal_id
+      HAVING cnt > 1
+    `).all() as any[];
+
+    if (dupDebits.length > 0) {
+      const msg = `[Migration Error] Duplicate withdrawal_debit entries detected for withdrawal_ids: ${dupDebits.map(d => d.withdrawal_id).join(', ')}. Migration halted to protect production data.`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_withdrawal_debit_unique ON cashback_ledger(withdrawal_id) WHERE type = 'withdrawal_debit';`);
-  } catch {
-    // Index already exists
+    console.log('[Migration] idx_ledger_withdrawal_debit_unique verified and applied successfully.');
+  } catch (err: any) {
+    console.error('[Migration Failure] idx_ledger_withdrawal_debit_unique creation failed:', err.message);
+    throw err;
+  }
+
+  try {
+    const dupRefunds = db.prepare(`
+      SELECT withdrawal_id, COUNT(*) as cnt
+      FROM cashback_ledger
+      WHERE type = 'admin_adjustment' AND withdrawal_id IS NOT NULL
+      GROUP BY withdrawal_id
+      HAVING cnt > 1
+    `).all() as any[];
+
+    if (dupRefunds.length > 0) {
+      const msg = `[Migration Error] Duplicate admin_adjustment refund entries detected for withdrawal_ids: ${dupRefunds.map(d => d.withdrawal_id).join(', ')}. Migration halted.`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_refund_withdrawal ON cashback_ledger(withdrawal_id) WHERE type = 'admin_adjustment';`);
+    console.log('[Migration] idx_ledger_refund_withdrawal verified and applied successfully.');
+  } catch (err: any) {
+    console.error('[Migration Failure] idx_ledger_refund_withdrawal creation failed:', err.message);
+    throw err;
+  }
+
+  try {
+    const dupRefs = db.prepare(`
+      SELECT reference_id, COUNT(*) as cnt
+      FROM withdrawal_requests
+      WHERE reference_id IS NOT NULL AND reference_id != ''
+      GROUP BY reference_id
+      HAVING cnt > 1
+    `).all() as any[];
+
+    if (dupRefs.length > 0) {
+      const msg = `[Migration Error] Duplicate payment reference_id (UTR) detected: ${dupRefs.map(d => d.reference_id).join(', ')}. Migration halted.`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_withdrawal_reference_unique ON withdrawal_requests(reference_id) WHERE reference_id IS NOT NULL AND reference_id != '';`);
+    console.log('[Migration] idx_withdrawal_reference_unique verified and applied successfully.');
+  } catch (err: any) {
+    console.error('[Migration Failure] idx_withdrawal_reference_unique creation failed:', err.message);
+    throw err;
   }
 
   initSystemSettings();
