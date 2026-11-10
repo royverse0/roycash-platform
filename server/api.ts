@@ -2182,22 +2182,88 @@ apiRouter.get('/admin/users', requireAdmin, (req: Request, res: Response) => {
 });
 
 apiRouter.get('/admin/withdrawals', requireAdmin, (req: Request, res: Response) => {
-  const withdrawals = db.prepare(`
-    SELECT w.*, u.name as user_name, u.email as user_email
-    FROM withdrawal_requests w
-    JOIN users u ON w.user_id = u.id
-    ORDER BY w.requested_at DESC
-  `).all();
-  return res.json({ success: true, withdrawals });
+  try {
+    const rawWithdrawals = db.prepare(`
+      SELECT w.*, u.name as user_name, u.email as user_email
+      FROM withdrawal_requests w
+      JOIN users u ON w.user_id = u.id
+      ORDER BY w.requested_at DESC
+    `).all() as any[];
+
+    const withdrawals = rawWithdrawals.map(w => {
+      let maskedDetails = '••••••••';
+      try {
+        const details = JSON.parse(w.payout_details || '{}');
+        if (w.payout_method === 'upi') {
+          const upi = details.upi_id || details.upi || '';
+          if (upi.includes('@')) {
+            const [usr, dom] = upi.split('@');
+            maskedDetails = `${usr.slice(0, 2)}***@${dom}`;
+          } else {
+            maskedDetails = 'UPI (Masked)';
+          }
+        } else if (w.payout_method === 'bank') {
+          const acc = details.bank_account_number || details.account_number || '';
+          maskedDetails = `Bank A/C ••••${acc.slice(-4) || '****'}`;
+        }
+      } catch {
+        maskedDetails = '••••••••';
+      }
+
+      return {
+        ...w,
+        payout_details: maskedDetails, // Masked by default in list response
+      };
+    });
+
+    return res.json({ success: true, withdrawals });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to fetch withdrawals.' });
+  }
+});
+
+apiRouter.get('/admin/withdrawals/:id', requireAdmin, (req: Request, res: Response) => {
+  try {
+    const withdrawalId = String(req.params.id);
+    const wdr = db.prepare(`
+      SELECT w.*, u.name as user_name, u.email as user_email
+      FROM withdrawal_requests w
+      JOIN users u ON w.user_id = u.id
+      WHERE w.id = ?
+    `).get(withdrawalId) as any;
+
+    if (!wdr) {
+      return res.status(404).json({ success: false, error: 'Withdrawal request not found.' });
+    }
+
+    let parsedDetails = {};
+    try {
+      parsedDetails = JSON.parse(wdr.payout_details || '{}');
+    } catch {
+      parsedDetails = {};
+    }
+
+    return res.json({
+      success: true,
+      withdrawal: {
+        ...wdr,
+        payout_details: parsedDetails, // Authorized full payout details for admin inspection
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: 'Failed to fetch withdrawal detail.' });
+  }
 });
 
 apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res: Response) => {
   try {
-    const { status, reference_id, rejection_reason } = req.body;
+    const { status, reference_id, rejection_reason, admin_confirmation } = req.body;
     const now = new Date().toISOString();
     const withdrawalId = String(req.params.id);
+    const adminId = (req as AuthenticatedRequest).admin?.id || null;
 
-    if (!['approved', 'rejected', 'processing'].includes(status)) {
+    const validStatuses = ['pending', 'approved', 'processing', 'paid', 'rejected'];
+    if (!validStatuses.includes(status)) {
       return res.status(400).json({ success: false, error: 'Invalid withdrawal status.' });
     }
 
@@ -2206,29 +2272,107 @@ apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res:
       return res.status(404).json({ success: false, error: 'Withdrawal request not found.' });
     }
 
-    // STRICT IDEMPOTENCY: An already processed withdrawal cannot be re-processed or re-refunded
-    if (wdr.status !== 'pending' && wdr.status !== 'processing') {
+    const currentStatus = wdr.status;
+    if (currentStatus === 'paid' || currentStatus === 'rejected') {
       return res.status(400).json({
         success: false,
-        error: `Withdrawal request has already been finalized (current status: '${wdr.status}'). Duplicate status modifications or repeated refunds are strictly prevented.`,
+        error: `Withdrawal request is already in final status '${currentStatus}' and cannot be modified.`,
       });
+    }
+
+    // Explicit valid state transitions
+    const allowedTransitions: Record<string, string[]> = {
+      pending: ['approved', 'processing', 'rejected'],
+      approved: ['processing', 'paid', 'rejected'],
+      processing: ['paid', 'rejected'],
+    };
+
+    if (!allowedTransitions[currentStatus]?.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid status transition from '${currentStatus}' to '${status}'.`,
+      });
+    }
+
+    // Validation for 'paid'
+    if (status === 'paid') {
+      if (!reference_id || typeof reference_id !== 'string' || !reference_id.trim()) {
+        return res.status(400).json({
+          success: false,
+          error: 'A valid payment reference / UTR is required to mark a withdrawal as paid.',
+        });
+      }
+      if (!admin_confirmation) {
+        return res.status(400).json({
+          success: false,
+          error: 'Explicit admin confirmation that payment has been sent and verified is required.',
+        });
+      }
+    }
+
+    // Validation for 'rejected'
+    if (status === 'rejected') {
+      if (!rejection_reason || typeof rejection_reason !== 'string' || !rejection_reason.trim()) {
+        return res.status(400).json({
+          success: false,
+          error: 'Rejection reason is required when rejecting a withdrawal request.',
+        });
+      }
     }
 
     db.exec('BEGIN IMMEDIATE;');
     try {
-      db.prepare(`
+      const currentWdr = db.prepare('SELECT id, user_id, amount, status FROM withdrawal_requests WHERE id = ?').get(withdrawalId) as any;
+      if (!currentWdr || currentWdr.status !== currentStatus) {
+        db.exec('ROLLBACK;');
+        return res.status(400).json({
+          success: false,
+          error: 'Withdrawal status changed concurrently. Please refresh and try again.',
+        });
+      }
+
+      // Conditional update using previous status to prevent race conditions & ensure idempotency
+      const updateResult = db.prepare(`
         UPDATE withdrawal_requests
         SET status = ?, reference_id = ?, rejection_reason = ?, processed_at = ?
-        WHERE id = ?
-      `).run(status, reference_id || null, rejection_reason || null, now, withdrawalId);
+        WHERE id = ? AND status = ?
+      `).run(
+        status,
+        status === 'paid' ? reference_id.trim() : null,
+        status === 'rejected' ? rejection_reason.trim() : null,
+        now,
+        withdrawalId,
+        currentStatus
+      );
 
-      // If rejected, refund the held balance back to user's withdrawable ledger EXACTLY ONCE
+      if (updateResult.changes === 0) {
+        db.exec('ROLLBACK;');
+        return res.status(400).json({
+          success: false,
+          error: 'Failed to update withdrawal status due to concurrent conflict.',
+        });
+      }
+
+      // If rejected, refund held amount exactly once
       if (status === 'rejected') {
-        const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
-        db.prepare(`
-          INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-          VALUES (?, ?, 'admin_adjustment', ?, 'withdrawable', 'available', ?, ?)
-        `).run(ledgerId, wdr.user_id, wdr.amount, `Refund of Rejected Withdrawal Request (${withdrawalId})`, now);
+        const existingRefund = db.prepare(`
+          SELECT id FROM cashback_ledger
+          WHERE user_id = ? AND type = 'admin_adjustment' AND description LIKE ?
+        `).get(currentWdr.user_id, `%(${withdrawalId})%`);
+
+        if (!existingRefund) {
+          const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
+          db.prepare(`
+            INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
+            VALUES (?, ?, 'admin_adjustment', ?, 'withdrawable', 'available', ?, ?)
+          `).run(
+            ledgerId,
+            currentWdr.user_id,
+            currentWdr.amount,
+            `Refund of Rejected Withdrawal Request (${withdrawalId})`,
+            now
+          );
+        }
       }
 
       db.exec('COMMIT;');
@@ -2237,7 +2381,21 @@ apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res:
       throw txErr;
     }
 
-    return res.json({ success: true, message: `Withdrawal request marked as ${status}.` });
+    logAdminActivity(
+      adminId,
+      'WITHDRAWAL_STATUS_UPDATED',
+      {
+        withdrawal_id: withdrawalId,
+        previous_status: currentStatus,
+        new_status: status,
+        reference_id: status === 'paid' ? reference_id.trim() : null,
+        rejection_reason: status === 'rejected' ? rejection_reason.trim() : null,
+      },
+      req.ip,
+      req.headers['user-agent'] as string
+    );
+
+    return res.json({ success: true, message: `Withdrawal request successfully updated to ${status}.` });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: 'Failed to update withdrawal status.' });
   }

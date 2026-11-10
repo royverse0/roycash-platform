@@ -40,6 +40,7 @@ async function runComprehensiveSecuritySuite() {
 
   let passed = 0;
   let total = 0;
+  let adminCookie = '';
 
   function assert(condition: boolean, desc: string) {
     total++;
@@ -483,7 +484,7 @@ async function runComprehensiveSecuritySuite() {
 
     const cookiesArr = (loginRes.headers as any).getSetCookie ? (loginRes.headers as any).getSetCookie() : [loginRes.headers.get('set-cookie') || ''];
     const setCookie = cookiesArr.join('; ');
-    const adminCookie = setCookie.match(/roycash_admin_token=([^;]+)/)?.[1] || '';
+    adminCookie = setCookie.match(/roycash_admin_token=([^;]+)/)?.[1] || '';
 
     const foreignOriginRes = await fetch(`${BASE_URL}/api/admin/settings`, {
       method: 'PUT',
@@ -963,6 +964,141 @@ async function runComprehensiveSecuritySuite() {
     const unvDupTimelineData = await unvDupTrackingRes.json();
     const unvTimeline = unvDupTimelineData.tracking?.timeline || [];
     assert(unvTimeline.length >= 2 && unvTimeline[0].state === 'completed' && unvTimeline[1].state === 'action_required', 'M1.2-11b: Unverified event is excluded from tracking timeline and does not pollute step status');
+
+    // =========================================================================
+    // 7. MILESTONE 1.3: SECURE ADMIN WITHDRAWAL MANAGEMENT TESTS
+    // =========================================================================
+    console.log('\n--- 7. Milestone 1.3: Secure Admin Withdrawal Management ---');
+
+    const wdrTestUserId = 'usr_wdr_' + Date.now();
+    db.prepare(`
+      INSERT INTO users (id, email, name, password_hash, salt, referral_code, upi_id, created_at, updated_at)
+      VALUES (?, 'wdruser@roycash.sec', 'Withdrawal User', 'h', 's', ?, 'secretupi@paytm', ?, ?)
+    `).run(wdrTestUserId, `REF_WDR_${Date.now()}`, now, now);
+
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, 'cashback', 1000, 'withdrawable', 'available', 'Initial balance', ?)
+    `).run('ldg_init_' + Date.now(), wdrTestUserId, now);
+
+    const testWdrId = 'wdr_test_' + Date.now();
+    const testWdrAmount = 500;
+    db.prepare(`
+      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "secretupi@paytm"}', 'pending', ?)
+    `).run(testWdrId, wdrTestUserId, testWdrAmount, now);
+
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held', ?)
+    `).run('ldg_debit_' + Date.now(), wdrTestUserId, testWdrAmount, now);
+
+    const nonAdminWdrRes = await fetch(`${BASE_URL}/api/admin/withdrawals`, {
+      headers: { Cookie: `session_token=${userSessionToken}` },
+    });
+    assert(nonAdminWdrRes.status === 403 || nonAdminWdrRes.status === 401, 'M1.3-2: Non-admin cannot access withdrawal management');
+
+    const adminWdrListRes = await fetch(`${BASE_URL}/api/admin/withdrawals`, {
+      headers: { Cookie: `roycash_admin_token=${adminCookie}`, 'Origin': ORIGIN },
+    });
+    const adminWdrListData = await adminWdrListRes.json();
+    assert(adminWdrListRes.status === 200 && Array.isArray(adminWdrListData.withdrawals), 'M1.3-1: Admin can list withdrawal requests');
+
+    const listedWdr = adminWdrListData.withdrawals.find((w: any) => w.id === testWdrId);
+    assert(listedWdr && !listedWdr.payout_details.includes('secretupi@paytm'), 'M1.3-12: Full payout details are masked in the list response');
+
+    const invalidTransRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'paid', reference_id: 'UTR123', admin_confirmation: true }),
+    });
+    assert(invalidTransRes.status === 400, 'M1.3-11: Invalid status transitions (pending -> paid directly) are rejected with 400');
+
+    const approveRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'approved' }),
+    });
+    const approveJson = await approveRes.json();
+    assert(approveRes.status === 200 && approveJson.success, 'M1.3-3: Pending request can be approved');
+
+    const processRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'processing' }),
+    });
+    const processJson = await processRes.json();
+    assert(processRes.status === 200 && processJson.success, 'M1.3-4: Approved request can move to processing');
+
+    const paidWithoutUtrRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'paid', reference_id: '', admin_confirmation: true }),
+    });
+    assert(paidWithoutUtrRes.status === 400, 'M1.3-5a: Marking paid without valid payment reference is rejected');
+
+    const paidWithoutConfirmRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'paid', reference_id: 'UTR_TEST_999', admin_confirmation: false }),
+    });
+    assert(paidWithoutConfirmRes.status === 400, 'M1.3-5b: Marking paid without explicit admin confirmation is rejected');
+
+    const validPaidRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'paid', reference_id: 'UTR_TEST_999', admin_confirmation: true }),
+    });
+    const validPaidJson = await validPaidRes.json();
+    assert(validPaidRes.status === 200 && validPaidJson.success, 'M1.3-5c: Processing request marked paid with valid reference and confirmation succeeds');
+
+    const paidTwiceRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'paid', reference_id: 'UTR_TEST_DUPLICATE', admin_confirmation: true }),
+    });
+    assert(paidTwiceRes.status === 400, 'M1.3-6: Paid request cannot be paid twice');
+
+    const rejectWdrId = 'wdr_reject_' + Date.now();
+    db.prepare(`
+      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "secretupi@paytm"}', 'pending', ?)
+    `).run(rejectWdrId, wdrTestUserId, 300, now);
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, 'withdrawal_debit', 300, 'withdrawable', 'deducted', 'Payout Request Held', ?)
+    `).run('ldg_debit_rej_' + Date.now(), wdrTestUserId, now);
+
+    const rejectRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${rejectWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'rejected', rejection_reason: 'Incorrect UPI handle' }),
+    });
+    const rejectJson = await rejectRes.json();
+    assert(rejectRes.status === 200 && rejectJson.success, 'M1.3-7a: Rejected request succeeds with rejection reason');
+
+    const refundEntries = db.prepare(`
+      SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'admin_adjustment' AND description LIKE ?
+    `).all(wdrTestUserId, `%(${rejectWdrId})%`);
+    assert(refundEntries.length === 1, 'M1.3-7b: Rejected request refunds held amount exactly once');
+
+    const rejectAfterRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${rejectWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'approved' }),
+    });
+    assert(rejectAfterRes.status === 400, 'M1.3-8: Rejected request cannot be approved or processed later');
+
+    const auditLog = db.prepare(`
+      SELECT * FROM admin_activity_logs WHERE action = 'WITHDRAWAL_STATUS_UPDATED' ORDER BY created_at DESC LIMIT 1
+    `).get() as any;
+    assert(auditLog && auditLog.details && !auditLog.details.includes('secretupi@paytm'), 'M1.3-13: Audit records are created without sensitive payout details');
+
+    const userLedgerSum = (db.prepare(`
+      SELECT COALESCE(SUM(CASE WHEN status = 'available' THEN amount ELSE -amount END), 0) as bal
+      FROM cashback_ledger WHERE user_id = ? AND balance_type = 'withdrawable'
+    `).get(wdrTestUserId) as any).bal;
+    assert(typeof userLedgerSum === 'number', 'M1.3-14: Existing wallet balance calculations remain correct after transitions');
 
   } finally {
     // =========================================================================

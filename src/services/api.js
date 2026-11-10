@@ -94,4 +94,10 @@ export const api = {
     request(`/admin/campaigns/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   deleteAdminCampaign: (id) =>
     request(`/admin/campaigns/${id}`, { method: 'DELETE' }),
+
+  // Admin Withdrawal Management
+  getAdminWithdrawals: () => request('/admin/withdrawals'),
+  getAdminWithdrawalById: (id) => request(`/admin/withdrawals/${id}`),
+  updateWithdrawalStatus: (id, payload) =>
+    request(`/admin/withdrawals/${id}/status`, { method: 'PUT', body: JSON.stringify(payload) }),
 };

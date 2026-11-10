@@ -93,6 +93,56 @@ export default function Admin({ navigate }) {
   const [campaignTypeFilter, setCampaignTypeFilter] = useState('all');
   const [selectedCampaignForView, setSelectedCampaignForView] = useState(null);
 
+  // Withdrawal Management State
+  const [withdrawalsList, setWithdrawalsList] = useState([]);
+  const [withdrawalFilter, setWithdrawalFilter] = useState('all');
+  const [withdrawalSearch, setWithdrawalSearch] = useState('');
+  const [selectedWithdrawalDetail, setSelectedWithdrawalDetail] = useState(null);
+  const [detailModalLoading, setDetailModalLoading] = useState(false);
+  const [withdrawalActionModal, setWithdrawalActionModal] = useState(null);
+  const [withdrawalUtrInput, setWithdrawalUtrInput] = useState('');
+  const [withdrawalRejectInput, setWithdrawalRejectInput] = useState('');
+  const [withdrawalAdminConfirm, setWithdrawalAdminConfirm] = useState(false);
+  const [withdrawalActionLoading, setWithdrawalActionLoading] = useState(false);
+
+  const handleUpdateWithdrawalStatus = async (id, status, extra = {}) => {
+    try {
+      setWithdrawalActionLoading(true);
+      setErrorMsg('');
+      setSuccessMsg('');
+
+      const payload = { status, ...extra };
+      const res = await api.updateWithdrawalStatus(id, payload);
+      if (res.success) {
+        setSuccessMsg(res.message || `Withdrawal updated to ${status}.`);
+        setWithdrawalActionModal(null);
+        setWithdrawalUtrInput('');
+        setWithdrawalRejectInput('');
+        setWithdrawalAdminConfirm(false);
+        await loadTabContent('withdrawals');
+      }
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to update withdrawal status.');
+    } finally {
+      setWithdrawalActionLoading(false);
+    }
+  };
+
+  const handleOpenWithdrawalDetail = async (wdr) => {
+    try {
+      setDetailModalLoading(true);
+      setSelectedWithdrawalDetail(wdr);
+      const res = await api.getAdminWithdrawalById(wdr.id);
+      if (res.success) {
+        setSelectedWithdrawalDetail(res.withdrawal);
+      }
+    } catch (err) {
+      setErrorMsg(err.message || 'Failed to load withdrawal details.');
+    } finally {
+      setDetailModalLoading(false);
+    }
+  };
+
   // Campaign Form Modal / Slide-over State
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingCampaignId, setEditingCampaignId] = useState(null);
@@ -205,6 +255,9 @@ export default function Admin({ navigate }) {
       } else if (tab === 'profile') {
         const profileRes = await api.getAdminMe();
         if (profileRes.success) setAdminProfile(profileRes);
+      } else if (tab === 'withdrawals') {
+        const wdrRes = await api.getAdminWithdrawals();
+        if (wdrRes.success) setWithdrawalsList(wdrRes.withdrawals || []);
       }
     } catch (err) {
       console.error(`Failed to load ${tab}:`, err);
@@ -624,7 +677,7 @@ export default function Admin({ navigate }) {
     { id: 'tracking', label: 'Conversion Tracking', icon: TrendingUp, status: 'coming_soon' },
     { id: 'users_wallets', label: 'Users & Wallets', icon: UserCheck, status: 'coming_soon' },
     { id: 'cashback', label: 'Cashback Management', icon: ShieldCheck, status: 'coming_soon' },
-    { id: 'withdrawals', label: 'Withdrawal Management', icon: Send, status: 'coming_soon' },
+    { id: 'withdrawals', label: 'Withdrawal Management', icon: Send, status: 'active' },
     { id: 'telegram', label: 'Telegram Bot Settings', icon: Radio, status: 'coming_soon' },
     { id: 'reports', label: 'Reports & Analytics', icon: FileText, status: 'coming_soon' },
     { id: 'settings', label: 'System Settings', icon: Settings, status: 'active' },
@@ -2349,6 +2402,425 @@ export default function Admin({ navigate }) {
               )}
             </div>
           )}
+
+          {/* ============================================================== */}
+          {/* TAB: WITHDRAWAL MANAGEMENT */}
+          {/* ============================================================== */}
+          {activeTab === 'withdrawals' && (
+            <div>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  marginBottom: '28px',
+                  flexWrap: 'wrap',
+                  gap: '16px',
+                }}
+              >
+                <div>
+                  <h1 style={{ fontSize: '1.75rem', fontWeight: 800, color: '#FFFFFF', letterSpacing: '-0.02em' }}>
+                    Withdrawal Management & Payouts
+                  </h1>
+                  <p style={{ color: 'var(--text-dim)', fontSize: '0.875rem', marginTop: '4px' }}>
+                    Review, approve, process, pay, or reject user withdrawal requests backed by secure ledger holds and atomic ACID transactions
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <button
+                    type="button"
+                    onClick={() => loadTabContent('withdrawals')}
+                    disabled={isRefreshing}
+                    className="btn btn-outline"
+                    style={{ padding: '8px 16px', fontSize: '0.825rem' }}
+                  >
+                    <RefreshCw size={14} className={isRefreshing ? 'spin' : ''} style={{ marginRight: '6px' }} />
+                    {isRefreshing ? 'Refreshing...' : 'Refresh Requests'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Filters & Search */}
+              <div className="glass-card" style={{ padding: '20px', marginBottom: '24px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px' }}>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {['all', 'pending', 'approved', 'processing', 'paid', 'rejected'].map((f) => (
+                      <button
+                        key={f}
+                        type="button"
+                        onClick={() => setWithdrawalFilter(f)}
+                        className={`btn ${withdrawalFilter === f ? 'btn-primary' : 'btn-outline'}`}
+                        style={{ padding: '6px 14px', fontSize: '0.8rem', textTransform: 'capitalize' }}
+                      >
+                        {f}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="Search by Request ID, User Name, Email..."
+                      value={withdrawalSearch}
+                      onChange={(e) => setWithdrawalSearch(e.target.value)}
+                      className="contact-input"
+                      style={{ width: '280px', fontSize: '0.85rem', padding: '8px 12px' }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Withdrawals Table */}
+              <div className="glass-card" style={{ padding: '0', overflow: 'hidden' }}>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.875rem' }}>
+                    <thead>
+                      <tr style={{ background: 'rgba(255, 255, 255, 0.03)', borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
+                        <th style={{ padding: '14px 16px', fontWeight: 600 }}>Request ID</th>
+                        <th style={{ padding: '14px 16px', fontWeight: 600 }}>User</th>
+                        <th style={{ padding: '14px 16px', fontWeight: 600 }}>Amount</th>
+                        <th style={{ padding: '14px 16px', fontWeight: 600 }}>Payout Method</th>
+                        <th style={{ padding: '14px 16px', fontWeight: 600 }}>Requested Date</th>
+                        <th style={{ padding: '14px 16px', fontWeight: 600 }}>Status</th>
+                        <th style={{ padding: '14px 16px', fontWeight: 600, textAlign: 'right' }}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {withdrawalsList
+                        .filter((w) => {
+                          if (withdrawalFilter !== 'all' && w.status !== withdrawalFilter) return false;
+                          if (withdrawalSearch.trim()) {
+                            const q = withdrawalSearch.toLowerCase();
+                            return (
+                              w.id.toLowerCase().includes(q) ||
+                              w.user_name?.toLowerCase().includes(q) ||
+                              w.user_email?.toLowerCase().includes(q)
+                            );
+                          }
+                          return true;
+                        })
+                        .map((w) => {
+                          const statusBadgeColor =
+                            w.status === 'paid'
+                              ? { bg: 'rgba(16, 185, 129, 0.15)', color: '#34D399' }
+                              : w.status === 'rejected'
+                              ? { bg: 'rgba(239, 68, 68, 0.15)', color: '#F87171' }
+                              : w.status === 'approved'
+                              ? { bg: 'rgba(59, 130, 246, 0.15)', color: '#60A5FA' }
+                              : w.status === 'processing'
+                              ? { bg: 'rgba(168, 85, 247, 0.15)', color: '#C084FC' }
+                              : { bg: 'rgba(245, 158, 11, 0.15)', color: '#FBBF24' };
+
+                          return (
+                            <tr key={w.id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                              <td style={{ padding: '14px 16px', fontFamily: 'var(--font-mono)', fontSize: '0.8rem', color: '#FFFFFF' }}>
+                                {w.id}
+                              </td>
+                              <td style={{ padding: '14px 16px' }}>
+                                <div style={{ fontWeight: 600, color: '#FFFFFF' }}>{w.user_name}</div>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>{w.user_email}</div>
+                              </td>
+                              <td style={{ padding: '14px 16px', fontWeight: 700, color: 'var(--emerald-light)' }}>
+                                ₹{w.amount} {w.currency}
+                              </td>
+                              <td style={{ padding: '14px 16px' }}>
+                                <div style={{ textTransform: 'uppercase', fontSize: '0.75rem', fontWeight: 700, color: '#FFFFFF' }}>{w.payout_method}</div>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{w.payout_details}</div>
+                              </td>
+                              <td style={{ padding: '14px 16px', color: 'var(--text-dim)', fontSize: '0.8rem' }}>
+                                {new Date(w.requested_at).toLocaleString()}
+                              </td>
+                              <td style={{ padding: '14px 16px' }}>
+                                <span className="badge" style={{ background: statusBadgeColor.bg, color: statusBadgeColor.color, textTransform: 'capitalize' }}>
+                                  {w.status}
+                                </span>
+                              </td>
+                              <td style={{ padding: '14px 16px', textAlign: 'right' }}>
+                                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenWithdrawalDetail(w)}
+                                    className="btn btn-outline"
+                                    style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                                  >
+                                    View
+                                  </button>
+
+                                  {w.status === 'pending' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateWithdrawalStatus(w.id, 'approved')}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-primary"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem', background: '#3B82F6' }}
+                                      >
+                                        Approve
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateWithdrawalStatus(w.id, 'processing')}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-primary"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem', background: '#9333EA' }}
+                                      >
+                                        Process
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setWithdrawalActionModal({ type: 'reject', withdrawal: w })}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-outline"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem', color: '#F87171', borderColor: 'rgba(239, 68, 68, 0.3)' }}
+                                      >
+                                        Reject
+                                      </button>
+                                    </>
+                                  )}
+
+                                  {w.status === 'approved' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateWithdrawalStatus(w.id, 'processing')}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-primary"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem', background: '#9333EA' }}
+                                      >
+                                        Process
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setWithdrawalActionModal({ type: 'paid', withdrawal: w })}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-primary"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                                      >
+                                        Mark Paid
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setWithdrawalActionModal({ type: 'reject', withdrawal: w })}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-outline"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem', color: '#F87171', borderColor: 'rgba(239, 68, 68, 0.3)' }}
+                                      >
+                                        Reject
+                                      </button>
+                                    </>
+                                  )}
+
+                                  {w.status === 'processing' && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => setWithdrawalActionModal({ type: 'paid', withdrawal: w })}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-primary"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                                      >
+                                        Mark Paid
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setWithdrawalActionModal({ type: 'reject', withdrawal: w })}
+                                        disabled={withdrawalActionLoading}
+                                        className="btn btn-outline"
+                                        style={{ padding: '6px 10px', fontSize: '0.75rem', color: '#F87171', borderColor: 'rgba(239, 68, 68, 0.3)' }}
+                                      >
+                                        Reject
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      {withdrawalsList.length === 0 && (
+                        <tr>
+                          <td colSpan={7} style={{ padding: '48px', textAlign: 'center', color: 'var(--text-dim)' }}>
+                            No withdrawal requests found in the database.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Detail Modal */}
+              {selectedWithdrawalDetail && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+                  <div className="glass-card" style={{ maxWidth: '600px', width: '100%', padding: '32px', border: '1px solid var(--border-emerald)', maxHeight: '90vh', overflowY: 'auto' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                      <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#FFFFFF' }}>Withdrawal Request Details</h3>
+                      <button type="button" onClick={() => setSelectedWithdrawalDetail(null)} className="btn btn-outline" style={{ padding: '4px 10px' }}>✕</button>
+                    </div>
+
+                    {detailModalLoading ? (
+                      <div style={{ textAlign: 'center', padding: '32px', color: 'var(--text-dim)' }}>Loading authorized payout details...</div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', fontSize: '0.9rem' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                          <span style={{ color: 'var(--text-dim)' }}>Request ID:</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: '#FFFFFF' }}>{selectedWithdrawalDetail.id}</span>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                          <span style={{ color: 'var(--text-dim)' }}>User Name:</span>
+                          <span style={{ color: '#FFFFFF' }}>{selectedWithdrawalDetail.user_name}</span>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                          <span style={{ color: 'var(--text-dim)' }}>User Email:</span>
+                          <span style={{ color: '#FFFFFF' }}>{selectedWithdrawalDetail.user_email}</span>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                          <span style={{ color: 'var(--text-dim)' }}>Amount:</span>
+                          <span style={{ fontWeight: 700, color: 'var(--emerald-light)' }}>₹{selectedWithdrawalDetail.amount} {selectedWithdrawalDetail.currency}</span>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                          <span style={{ color: 'var(--text-dim)' }}>Status:</span>
+                          <span style={{ textTransform: 'capitalize', color: '#FFFFFF' }}>{selectedWithdrawalDetail.status}</span>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                          <span style={{ color: 'var(--text-dim)' }}>Payout Method:</span>
+                          <span style={{ textTransform: 'uppercase', color: '#FFFFFF' }}>{selectedWithdrawalDetail.payout_method}</span>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                          <span style={{ color: 'var(--text-dim)' }}>Full Payout Details:</span>
+                          <pre style={{ color: 'var(--emerald-light)', fontSize: '0.8rem', background: 'rgba(0,0,0,0.3)', padding: '8px', borderRadius: '4px', overflowX: 'auto', margin: 0 }}>
+                            {typeof selectedWithdrawalDetail.payout_details === 'object'
+                              ? JSON.stringify(selectedWithdrawalDetail.payout_details, null, 2)
+                              : selectedWithdrawalDetail.payout_details}
+                          </pre>
+                        </div>
+                        {selectedWithdrawalDetail.reference_id && (
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(255,255,255,0.02)', borderRadius: '6px' }}>
+                            <span style={{ color: 'var(--text-dim)' }}>Payment Reference (UTR):</span>
+                            <span style={{ fontFamily: 'var(--font-mono)', color: '#34D399' }}>{selectedWithdrawalDetail.reference_id}</span>
+                          </div>
+                        )}
+                        {selectedWithdrawalDetail.rejection_reason && (
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '10px', padding: '10px', background: 'rgba(239,68,68,0.05)', borderRadius: '6px', border: '1px solid rgba(239,68,68,0.2)' }}>
+                            <span style={{ color: '#F87171' }}>Rejection Reason:</span>
+                            <span style={{ color: '#F87171' }}>{selectedWithdrawalDetail.rejection_reason}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <div style={{ marginTop: '24px', textAlign: 'right' }}>
+                      <button type="button" onClick={() => setSelectedWithdrawalDetail(null)} className="btn btn-outline" style={{ padding: '8px 20px' }}>Close</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Action Modal (Mark Paid / Reject) */}
+              {withdrawalActionModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: '20px' }}>
+                  <div className="glass-card" style={{ maxWidth: '500px', width: '100%', padding: '32px', border: '1px solid var(--border-emerald)' }}>
+                    <h3 style={{ fontSize: '1.25rem', fontWeight: 700, color: '#FFFFFF', marginBottom: '16px', textTransform: 'capitalize' }}>
+                      {withdrawalActionModal.type === 'paid' ? 'Mark Withdrawal as Paid' : 'Reject Withdrawal Request'}
+                    </h3>
+
+                    <p style={{ color: 'var(--text-dim)', fontSize: '0.85rem', marginBottom: '20px' }}>
+                      Request ID: <code style={{ color: '#FFFFFF' }}>{withdrawalActionModal.withdrawal.id}</code> (User: {withdrawalActionModal.withdrawal.user_name}, Amount: ₹{withdrawalActionModal.withdrawal.amount})
+                    </p>
+
+                    {withdrawalActionModal.type === 'paid' && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                            Payment Reference / UTR Number (Required)
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={withdrawalUtrInput}
+                            onChange={(e) => setWithdrawalUtrInput(e.target.value)}
+                            placeholder="e.g. UTR1234567890IN"
+                            className="contact-input"
+                            style={{ width: '100%' }}
+                          />
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px' }}>
+                          <input
+                            type="checkbox"
+                            id="adminConfirmCheck"
+                            checked={withdrawalAdminConfirm}
+                            onChange={(e) => setWithdrawalAdminConfirm(e.target.checked)}
+                            style={{ marginTop: '3px' }}
+                          />
+                          <label htmlFor="adminConfirmCheck" style={{ fontSize: '0.825rem', color: '#FFFFFF', lineHeight: 1.4, cursor: 'pointer' }}>
+                            I explicitly confirm that payment of ₹{withdrawalActionModal.withdrawal.amount} has actually been sent and verified via our banking channel.
+                          </label>
+                        </div>
+                      </div>
+                    )}
+
+                    {withdrawalActionModal.type === 'reject' && (
+                      <div>
+                        <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                          Rejection Reason (Required — will be logged & refunded to ledger once)
+                        </label>
+                        <textarea
+                          required
+                          rows={3}
+                          value={withdrawalRejectInput}
+                          onChange={(e) => setWithdrawalRejectInput(e.target.value)}
+                          placeholder="e.g. Invalid bank account details or KYC mismatch."
+                          className="contact-input"
+                          style={{ width: '100%', resize: 'vertical' }}
+                        />
+                      </div>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end', marginTop: '24px' }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWithdrawalActionModal(null);
+                          setWithdrawalUtrInput('');
+                          setWithdrawalRejectInput('');
+                          setWithdrawalAdminConfirm(false);
+                        }}
+                        className="btn btn-outline"
+                        style={{ padding: '8px 16px' }}
+                      >
+                        Cancel
+                      </button>
+
+                      {withdrawalActionModal.type === 'paid' ? (
+                        <button
+                          type="button"
+                          disabled={withdrawalActionLoading || !withdrawalUtrInput.trim() || !withdrawalAdminConfirm}
+                          onClick={() => handleUpdateWithdrawalStatus(withdrawalActionModal.withdrawal.id, 'paid', { reference_id: withdrawalUtrInput, admin_confirmation: true })}
+                          className="btn btn-primary"
+                          style={{ padding: '8px 20px' }}
+                        >
+                          {withdrawalActionLoading ? 'Processing...' : 'Confirm Paid'}
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={withdrawalActionLoading || !withdrawalRejectInput.trim()}
+                          onClick={() => handleUpdateWithdrawalStatus(withdrawalActionModal.withdrawal.id, 'rejected', { rejection_reason: withdrawalRejectInput })}
+                          className="btn btn-primary"
+                          style={{ padding: '8px 20px', background: '#EF4444' }}
+                        >
+                          {withdrawalActionLoading ? 'Processing...' : 'Confirm Reject & Refund'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {activeTab === 'settings' && (
             <div>
               <div style={{ marginBottom: '28px' }}>
