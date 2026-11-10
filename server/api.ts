@@ -401,7 +401,7 @@ apiRouter.get('/offers/redirect/:clickId', (req: Request, res: Response) => {
   try {
     const clickId = String(req.params.clickId);
     const click = db.prepare(`
-      SELECT c.*, cmp.tracking_url_template, cmp.name, cmp.is_demo
+      SELECT c.*, cmp.tracking_url_template, cmp.name, cmp.is_demo, cmp.provider
       FROM offer_clicks c
       JOIN campaigns cmp ON c.campaign_id = cmp.id
       WHERE c.click_id = ?
@@ -419,6 +419,12 @@ apiRouter.get('/offers/redirect/:clickId', (req: Request, res: Response) => {
     // If sandbox demo offer, redirect back to the live tracking page with guidance
     if (click.is_demo) {
       return res.redirect(`/#/track/${click.click_id}?sandbox=true`);
+    }
+
+    // Check provider live status before redirecting to live affiliate tracking link
+    const providerConfig = db.prepare('SELECT * FROM provider_integrations WHERE id = ?').get(click.provider || 'mitgo') as any;
+    if (!providerConfig || !providerConfig.is_live) {
+      return res.status(403).send('Live campaign tracking URL redirect is disabled: provider integration is unverified or not live.');
     }
 
     return res.redirect(targetUrl);
@@ -452,85 +458,138 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
       return res.status(403).json({ success: false, error: 'Unauthorized.' });
     }
 
-    // Fetch campaign steps
+    // Fetch campaign steps ordered by step_order ASC
     const steps = db.prepare('SELECT * FROM campaign_steps WHERE campaign_id = ? ORDER BY step_order ASC').all(click.campaign_id) as any[];
 
     // Fetch verified events
     const events = db.prepare('SELECT * FROM offer_events WHERE click_id = ? ORDER BY created_at ASC').all(click.click_id) as any[];
 
-    const completedStepTypes = new Set(events.filter((e) => e.status === 'confirmed').map((e) => e.step_type));
+    const completedStepTypes = new Set(
+      events
+        .filter((e) => e.status === 'confirmed' || e.status === 'sandbox_confirmed')
+        .map((e) => e.step_type.toLowerCase())
+    );
 
-    // Determine current timeline status for each step
+    // Determine current timeline status for each step dynamically from campaign_steps
     const timeline = [];
+    let priorRequiredDone = true;
 
-    // Step: App Install
-    if (click.requires_install) {
-      const isDone = completedStepTypes.has('install');
-      timeline.push({
-        type: 'install',
-        title: '1. App Install',
-        status: isDone ? 'Install Completed' : 'Verifying Install',
-        state: isDone ? 'completed' : 'verifying',
-        instruction: isDone
-          ? 'Installation confirmed by provider. Proceed to the next step.'
-          : 'Download and open the app. Waiting for advertiser install postback confirmation.',
-        is_required: true,
-      });
-    }
+    if (steps.length > 0) {
+      steps.forEach((step, idx) => {
+        const stepType = (step.step_type || 'other').toLowerCase();
+        const isDone = completedStepTypes.has(stepType);
+        const isReq = step.is_required === 1 || step.is_required === true || String(step.is_required) === '1';
 
-    // Step: Signup
-    if (click.requires_signup) {
-      const isDone = completedStepTypes.has('signup');
-      const priorReady = !click.requires_install || completedStepTypes.has('install');
-      timeline.push({
-        type: 'signup',
-        title: '2. Account Registration',
-        status: isDone ? 'Signup Completed' : priorReady ? 'Action Required' : 'Waiting for Install',
-        state: isDone ? 'completed' : priorReady ? 'action_required' : 'pending_prior',
-        instruction: isDone
-          ? 'Registration verified by advertiser.'
-          : 'Open the advertiser application and register with your mobile phone or email.',
-        is_required: true,
-      });
-    }
+        let statusText = '';
+        let stateStr = '';
 
-    // Step: KYC
-    if (click.requires_kyc) {
-      const isDone = completedStepTypes.has('kyc');
-      const priorReady = completedStepTypes.has('signup');
-      timeline.push({
-        type: 'kyc',
-        title: '3. Identity / KYC Verification',
-        status: isDone ? 'KYC Completed' : priorReady ? 'Action Required' : 'Pending Previous Steps',
-        state: isDone ? 'completed' : priorReady ? 'action_required' : 'pending_prior',
-        instruction: isDone
-          ? 'Identity verification verified by advertiser records.'
-          : 'Complete in-app paperless KYC. RoyCash does not inspect external apps directly.',
-        is_required: true,
-      });
-    }
+        if (isDone) {
+          statusText = `${step.title} Completed`;
+          stateStr = 'completed';
+        } else if (priorRequiredDone) {
+          statusText = 'Action Required';
+          stateStr = 'action_required';
+        } else {
+          statusText = 'Pending Previous Steps';
+          stateStr = 'pending_prior';
+        }
 
-    // Step: Deposit
-    if (click.requires_deposit) {
-      const isDone = completedStepTypes.has('deposit');
-      const priorReady = (!click.requires_kyc || completedStepTypes.has('kyc')) && completedStepTypes.has('signup');
-      timeline.push({
-        type: 'deposit',
-        title: `4. First Deposit / Purchase (Min ₹${click.minimum_deposit_amount})`,
-        status: isDone ? 'Deposit Verified' : priorReady ? 'Action Required' : 'Pending Previous Steps',
-        state: isDone ? 'completed' : priorReady ? 'action_required' : 'pending_prior',
-        instruction: isDone
-          ? `Deposit of ₹${click.minimum_deposit_amount}+ confirmed by advertiser.`
-          : `Complete a minimum transaction/deposit of ₹${click.minimum_deposit_amount} inside the app.`,
-        is_required: true,
+        timeline.push({
+          step_order: step.step_order || (idx + 1),
+          type: stepType,
+          title: `${idx + 1}. ${step.title}`,
+          status: statusText,
+          state: stateStr,
+          instruction: isDone
+            ? `${step.title} confirmed by provider.`
+            : step.description || `Complete ${step.title} step.`,
+          is_required: isReq,
+          min_deposit_amount: step.min_deposit_amount || 0,
+        });
+
+        if (isReq && !isDone) {
+          priorRequiredDone = false;
+        }
       });
+    } else {
+      // Legacy step construction fallback if campaign_steps row is empty
+      let stepIdx = 1;
+
+      if (click.requires_install) {
+        const isDone = completedStepTypes.has('install');
+        timeline.push({
+          step_order: stepIdx,
+          type: 'install',
+          title: `${stepIdx}. App Install`,
+          status: isDone ? 'Install Completed' : 'Verifying Install',
+          state: isDone ? 'completed' : 'verifying',
+          instruction: isDone
+            ? 'Installation confirmed by provider.'
+            : 'Download and open the app. Waiting for advertiser install postback confirmation.',
+          is_required: true,
+        });
+        if (!isDone) priorRequiredDone = false;
+        stepIdx++;
+      }
+
+      if (click.requires_signup) {
+        const isDone = completedStepTypes.has('signup');
+        timeline.push({
+          step_order: stepIdx,
+          type: 'signup',
+          title: `${stepIdx}. Account Registration`,
+          status: isDone ? 'Signup Completed' : priorRequiredDone ? 'Action Required' : 'Waiting for Install',
+          state: isDone ? 'completed' : priorRequiredDone ? 'action_required' : 'pending_prior',
+          instruction: isDone
+            ? 'Registration verified by advertiser.'
+            : 'Open the advertiser application and register with your mobile phone or email.',
+          is_required: true,
+        });
+        if (!isDone) priorRequiredDone = false;
+        stepIdx++;
+      }
+
+      if (click.requires_kyc) {
+        const isDone = completedStepTypes.has('kyc');
+        timeline.push({
+          step_order: stepIdx,
+          type: 'kyc',
+          title: `${stepIdx}. Identity / KYC Verification`,
+          status: isDone ? 'KYC Completed' : priorRequiredDone ? 'Action Required' : 'Pending Previous Steps',
+          state: isDone ? 'completed' : priorRequiredDone ? 'action_required' : 'pending_prior',
+          instruction: isDone
+            ? 'Identity verification verified by advertiser records.'
+            : 'Complete in-app paperless KYC.',
+          is_required: true,
+        });
+        if (!isDone) priorRequiredDone = false;
+        stepIdx++;
+      }
+
+      if (click.requires_deposit) {
+        const isDone = completedStepTypes.has('deposit');
+        timeline.push({
+          step_order: stepIdx,
+          type: 'deposit',
+          title: `${stepIdx}. First Deposit / Purchase (Min ₹${click.minimum_deposit_amount})`,
+          status: isDone ? 'Deposit Verified' : priorRequiredDone ? 'Action Required' : 'Pending Previous Steps',
+          state: isDone ? 'completed' : priorRequiredDone ? 'action_required' : 'pending_prior',
+          instruction: isDone
+            ? `Deposit of ₹${click.minimum_deposit_amount}+ confirmed by advertiser.`
+            : `Complete a minimum transaction/deposit of ₹${click.minimum_deposit_amount} inside the app.`,
+          is_required: true,
+        });
+        if (!isDone) priorRequiredDone = false;
+        stepIdx++;
+      }
     }
 
     // Final Step: Cashback Settlement
     const convStatus = click.conversion_status || 'click_recorded';
     timeline.push({
+      step_order: timeline.length + 1,
       type: 'cashback',
-      title: '5. Cashback Approval & Payout',
+      title: `${timeline.length + 1}. Cashback Approval & Payout`,
       status:
         convStatus === 'approved'
           ? 'Approved & Credited'
@@ -1542,6 +1601,40 @@ apiRouter.get('/user/support/tickets', requireAuth, (req: AuthenticatedRequest, 
    6. ADMIN PORTAL (SECURE MANAGEMENT)
    ========================================================================== */
 
+export function validateStrictNumericValue(val: any, fieldName: string, allowZero = false): { valid: boolean; value?: number; error?: string } {
+  if (val === undefined || val === null) {
+    return { valid: false, error: `${fieldName} is required.` };
+  }
+  let str = '';
+  if (typeof val === 'number') {
+    if (isNaN(val) || !isFinite(val)) {
+      return { valid: false, error: `${fieldName} must be a finite number.` };
+    }
+    str = String(val);
+  } else if (typeof val === 'string') {
+    str = val.trim();
+  } else {
+    return { valid: false, error: `${fieldName} must be a valid number or numeric string.` };
+  }
+
+  if (!/^\d+(\.\d+)?$/.test(str)) {
+    return { valid: false, error: `${fieldName} format invalid. Must be a clean non-negative numeric value without trailing characters.` };
+  }
+
+  const num = Number(str);
+  if (isNaN(num) || !isFinite(num)) {
+    return { valid: false, error: `${fieldName} must be a valid finite number.` };
+  }
+
+  if (allowZero) {
+    if (num < 0) return { valid: false, error: `${fieldName} cannot be negative.` };
+  } else {
+    if (num <= 0) return { valid: false, error: `${fieldName} must be a positive number greater than 0.` };
+  }
+
+  return { valid: true, value: num };
+}
+
 // Helper validation for campaign payload
 function validateCampaignPayload(body: any) {
   if (!body || typeof body !== 'object') {
@@ -1560,17 +1653,55 @@ function validateCampaignPayload(body: any) {
   if (!description) return { valid: false, error: 'Description is required.' };
   if (!tracking_url_template) return { valid: false, error: 'Tracking URL Template is required.' };
 
-  const rawReward = parseFloat(String(body.reward_amount));
-  if (isNaN(rawReward) || !isFinite(rawReward) || rawReward <= 0) {
-    return { valid: false, error: 'Reward amount must be a positive number greater than 0.' };
+  // Validate URL template format
+  try {
+    const parsedUrl = new URL(tracking_url_template);
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      return { valid: false, error: 'Tracking URL Template must start with http:// or https://.' };
+    }
+  } catch {
+    return { valid: false, error: 'Tracking URL Template is not a valid HTTP or HTTPS URL.' };
   }
 
-  const status = ['active', 'paused', 'draft'].includes(body.status) ? body.status : 'active';
-  const is_demo = body.is_demo === 0 || body.is_demo === '0' || body.is_demo === false ? 0 : 1;
+  // Strict reward_amount validation
+  const rewardVal = validateStrictNumericValue(body.reward_amount, 'Reward Amount', false);
+  if (!rewardVal.valid) {
+    return { valid: false, error: rewardVal.error };
+  }
+
+  // Strict status validation (no silent fallbacks)
+  if (!body.status || typeof body.status !== 'string' || !['active', 'paused', 'draft'].includes(body.status.trim())) {
+    return { valid: false, error: "Campaign status must be explicitly set to 'active', 'paused', or 'draft'." };
+  }
+  const status = body.status.trim();
+
+  // Strict is_demo validation (no silent fallbacks)
+  if (body.is_demo === undefined || body.is_demo === null) {
+    return { valid: false, error: 'is_demo field is required (0 for Live, 1 for Demo).' };
+  }
+  let is_demo: number;
+  if (body.is_demo === 0 || body.is_demo === '0' || body.is_demo === false) {
+    is_demo = 0;
+  } else if (body.is_demo === 1 || body.is_demo === '1' || body.is_demo === true) {
+    is_demo = 1;
+  } else {
+    return { valid: false, error: 'is_demo must be 0 (Live) or 1 (Demo).' };
+  }
+
   const estimated_approval_days = Math.max(0, parseInt(String(body.estimated_approval_days || '30'), 10) || 30);
-  const minimum_deposit_amount = Math.max(0, parseFloat(String(body.minimum_deposit_amount || '0')) || 0);
+
+  // Strict minimum_deposit_amount validation
+  let minimum_deposit_amount = 0;
+  if (body.minimum_deposit_amount !== undefined && body.minimum_deposit_amount !== null && String(body.minimum_deposit_amount).trim() !== '') {
+    const minDepVal = validateStrictNumericValue(body.minimum_deposit_amount, 'Minimum Deposit Amount', true);
+    if (!minDepVal.valid) {
+      return { valid: false, error: minDepVal.error };
+    }
+    minimum_deposit_amount = minDepVal.value!;
+  }
 
   const rawSteps = Array.isArray(body.steps) ? body.steps : [];
+  const ALLOWED_STEP_TYPES = new Set(['install', 'signup', 'kyc', 'deposit', 'trade', 'other']);
   const steps = [];
 
   for (let i = 0; i < rawSteps.length; i++) {
@@ -1578,18 +1709,31 @@ function validateCampaignPayload(body: any) {
     if (!s || typeof s !== 'object') continue;
     const title = typeof s.title === 'string' ? s.title.trim() : '';
     const desc = typeof s.description === 'string' ? s.description.trim() : '';
-    const stepType = typeof s.step_type === 'string' && s.step_type.trim() ? s.step_type.trim().toLowerCase() : 'other';
+    const rawStepType = typeof s.step_type === 'string' ? s.step_type.trim().toLowerCase() : '';
 
     if (!title) return { valid: false, error: `Step #${i + 1} is missing a title.` };
     if (!desc) return { valid: false, error: `Step #${i + 1} ('${title}') is missing a description.` };
 
+    if (!rawStepType || !ALLOWED_STEP_TYPES.has(rawStepType)) {
+      return { valid: false, error: `Step #${i + 1} ('${title}') has invalid step_type '${s.step_type}'. Allowed types: install, signup, kyc, deposit, trade, other.` };
+    }
+
+    let minDep = 0;
+    if (s.min_deposit_amount !== undefined && s.min_deposit_amount !== null && String(s.min_deposit_amount).trim() !== '') {
+      const stepDepVal = validateStrictNumericValue(s.min_deposit_amount, `Step #${i + 1} Minimum Deposit Amount`, true);
+      if (!stepDepVal.valid) {
+        return { valid: false, error: stepDepVal.error };
+      }
+      minDep = stepDepVal.value!;
+    }
+
     steps.push({
       step_order: i + 1,
-      step_type: stepType,
+      step_type: rawStepType,
       title,
       description: desc,
       is_required: s.is_required === 0 || s.is_required === '0' || s.is_required === false ? 0 : 1,
-      min_deposit_amount: Math.max(0, parseFloat(String(s.min_deposit_amount || '0')) || 0),
+      min_deposit_amount: minDep,
     });
   }
 
@@ -1601,7 +1745,7 @@ function validateCampaignPayload(body: any) {
       category,
       description,
       tracking_url_template,
-      reward_amount: rawReward,
+      reward_amount: rewardVal.value!,
       currency: typeof body.currency === 'string' && body.currency.trim() ? body.currency.trim().toUpperCase() : 'INR',
       provider: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim().toLowerCase() : 'mitgo',
       provider_campaign_id: typeof body.provider_campaign_id === 'string' && body.provider_campaign_id.trim() ? body.provider_campaign_id.trim() : null,
@@ -1610,10 +1754,10 @@ function validateCampaignPayload(body: any) {
       estimated_approval_days,
       is_demo,
       status,
-      requires_install: body.requires_install ? 1 : 0,
-      requires_signup: body.requires_signup ? 1 : 0,
-      requires_kyc: body.requires_kyc ? 1 : 0,
-      requires_deposit: body.requires_deposit ? 1 : 0,
+      requires_install: steps.some((st) => st.step_type === 'install') ? 1 : (body.requires_install ? 1 : 0),
+      requires_signup: steps.some((st) => st.step_type === 'signup') ? 1 : (body.requires_signup ? 1 : 0),
+      requires_kyc: steps.some((st) => st.step_type === 'kyc') ? 1 : (body.requires_kyc ? 1 : 0),
+      requires_deposit: steps.some((st) => st.step_type === 'deposit') ? 1 : (body.requires_deposit ? 1 : 0),
       minimum_deposit_amount,
       steps,
     },
@@ -1665,6 +1809,18 @@ apiRouter.post('/admin/campaigns', requireAdmin, (req: Request, res: Response) =
     }
 
     const d = validation.data;
+
+    // LIVE CAMPAIGN SAFETY: Prevent creating active live campaigns if provider is unverified
+    if (d.is_demo === 0 && d.status === 'active') {
+      const provider = db.prepare('SELECT * FROM provider_integrations WHERE id = ?').get(d.provider || 'mitgo') as any;
+      if (!provider || !provider.is_live) {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot activate live campaign '${d.name}': provider integration '${d.provider || 'mitgo'}' is unverified or not live. Please set is_demo = 1 or set status to 'draft'/'paused' until provider is live.`,
+        });
+      }
+    }
+
     const campaignId = 'cmp_' + crypto.randomBytes(8).toString('hex');
     const now = new Date().toISOString();
     const adminId = (req as AuthenticatedRequest).admin?.id || null;
@@ -1739,6 +1895,18 @@ apiRouter.put('/admin/campaigns/:id', requireAdmin, (req: Request, res: Response
     }
 
     const d = validation.data;
+
+    // LIVE CAMPAIGN SAFETY: Prevent updating to active live campaign if provider is unverified
+    if (d.is_demo === 0 && d.status === 'active') {
+      const provider = db.prepare('SELECT * FROM provider_integrations WHERE id = ?').get(d.provider || 'mitgo') as any;
+      if (!provider || !provider.is_live) {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot activate live campaign '${d.name}': provider integration '${d.provider || 'mitgo'}' is unverified or not live. Please set is_demo = 1 or set status to 'draft'/'paused' until provider is live.`,
+        });
+      }
+    }
+
     const now = new Date().toISOString();
     const adminId = (req as AuthenticatedRequest).admin?.id || null;
 
@@ -1803,9 +1971,19 @@ apiRouter.patch('/admin/campaigns/:id/status', requireAdmin, (req: Request, res:
       return res.status(400).json({ success: false, error: "Invalid status. Must be 'active', 'paused', or 'draft'." });
     }
 
-    const campaign = db.prepare('SELECT id, name FROM campaigns WHERE id = ?').get(campaignId) as any;
+    const campaign = db.prepare('SELECT id, name, provider, is_demo FROM campaigns WHERE id = ?').get(campaignId) as any;
     if (!campaign) {
       return res.status(404).json({ success: false, error: 'Campaign not found.' });
+    }
+
+    if (status === 'active' && campaign.is_demo === 0) {
+      const provider = db.prepare('SELECT * FROM provider_integrations WHERE id = ?').get(campaign.provider || 'mitgo') as any;
+      if (!provider || !provider.is_live) {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot activate live campaign '${campaign.name}': provider integration '${campaign.provider || 'mitgo'}' is unverified or not live. Please set is_demo = 1 or change status to 'draft'/'paused' until provider is live.`,
+        });
+      }
     }
 
     const now = new Date().toISOString();

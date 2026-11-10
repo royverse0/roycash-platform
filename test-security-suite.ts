@@ -517,6 +517,181 @@ async function runComprehensiveSecuritySuite() {
     });
     assert(validOriginRes.status === 200, 'Cookie-authenticated request with valid Origin succeeds with 200 OK');
 
+    // =========================================================================
+    // 5. MILESTONE 1.1: CAMPAIGN MANAGEMENT INTEGRATION & SAFETY TESTS
+    // =========================================================================
+    console.log('\n--- 5. Milestone 1.1: Campaign Management Integration & Safety ---');
+
+    // A. Strict Payload Validation & Rejection Tests
+    const badRewardRes = await fetch(`${BASE_URL}/api/admin/campaigns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN, 'Cookie': `roycash_admin_token=${adminCookie}` },
+      body: JSON.stringify({
+        name: 'Bad Reward Test',
+        advertiser_name: 'Corp',
+        category: 'Finance',
+        description: 'Desc',
+        tracking_url_template: 'https://example.com/track',
+        reward_amount: '100abc',
+        status: 'active',
+        is_demo: 1,
+      }),
+    });
+    assert(badRewardRes.status === 400, 'Campaign creation with invalid reward amount ("100abc") rejected with 400 Bad Request');
+
+    const badUrlRes = await fetch(`${BASE_URL}/api/admin/campaigns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN, 'Cookie': `roycash_admin_token=${adminCookie}` },
+      body: JSON.stringify({
+        name: 'Bad URL Test',
+        advertiser_name: 'Corp',
+        category: 'Finance',
+        description: 'Desc',
+        tracking_url_template: 'ftp://invalid-scheme.com',
+        reward_amount: 500,
+        status: 'active',
+        is_demo: 1,
+      }),
+    });
+    assert(badUrlRes.status === 400, 'Campaign creation with invalid URL protocol ("ftp://...") rejected with 400 Bad Request');
+
+    const badStepTypeRes = await fetch(`${BASE_URL}/api/admin/campaigns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN, 'Cookie': `roycash_admin_token=${adminCookie}` },
+      body: JSON.stringify({
+        name: 'Bad Step Type Test',
+        advertiser_name: 'Corp',
+        category: 'Finance',
+        description: 'Desc',
+        tracking_url_template: 'https://example.com/track',
+        reward_amount: 500,
+        status: 'draft',
+        is_demo: 1,
+        steps: [
+          { title: 'Invalid Step', description: 'Desc', step_type: 'unsupported_type', is_required: 1 }
+        ],
+      }),
+    });
+    assert(badStepTypeRes.status === 400, 'Campaign creation with unsupported step_type ("unsupported_type") rejected with 400 Bad Request');
+
+    const badStatusRes = await fetch(`${BASE_URL}/api/admin/campaigns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN, 'Cookie': `roycash_admin_token=${adminCookie}` },
+      body: JSON.stringify({
+        name: 'Bad Status Test',
+        advertiser_name: 'Corp',
+        category: 'Finance',
+        description: 'Desc',
+        tracking_url_template: 'https://example.com/track',
+        reward_amount: 500,
+        status: 'super_active',
+        is_demo: 1,
+      }),
+    });
+    assert(badStatusRes.status === 400, 'Campaign creation with invalid status ("super_active") rejected with 400 Bad Request');
+
+    // B. Live Campaign Activation Guard Tests
+    const activateUnverifiedLiveRes = await fetch(`${BASE_URL}/api/admin/campaigns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN, 'Cookie': `roycash_admin_token=${adminCookie}` },
+      body: JSON.stringify({
+        name: 'Unverified Live Activation Test',
+        advertiser_name: 'UnverifiedCorp',
+        category: 'Crypto',
+        description: 'Desc',
+        tracking_url_template: 'https://example.com/track',
+        reward_amount: 500,
+        status: 'active',
+        is_demo: 0,
+        provider: 'mitgo',
+      }),
+    });
+    assert(activateUnverifiedLiveRes.status === 400, 'Creating an active live campaign (is_demo=0, status=active) when provider is unverified rejected with 400');
+
+    // C. Dynamic Campaign Steps & User Tracking API Tests
+    const customStepsCampRes = await fetch(`${BASE_URL}/api/admin/campaigns`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Origin': ORIGIN, 'Cookie': `roycash_admin_token=${adminCookie}` },
+      body: JSON.stringify({
+        name: 'Custom Trade Steps Demo Campaign',
+        advertiser_name: 'TradeCorp',
+        category: 'Fintech',
+        description: 'Test trading platform offer with custom trade step.',
+        tracking_url_template: 'https://tradecorp.com/signup?click={click_id}',
+        reward_amount: 750,
+        status: 'active',
+        is_demo: 1,
+        steps: [
+          { title: 'App Install', description: 'Install app', step_type: 'install', is_required: 1 },
+          { title: 'Account Signup', description: 'Create account', step_type: 'signup', is_required: 1 },
+          { title: 'Execute First Trade', description: 'Place a trade of min ₹500', step_type: 'trade', is_required: 1 },
+          { title: 'Optional Feedback', description: 'Leave feedback', step_type: 'other', is_required: 0 },
+        ],
+      }),
+    });
+    const customStepsCampData = await customStepsCampRes.json();
+    assert(customStepsCampRes.status === 201 && customStepsCampData.campaign_id, 'Created demo campaign with custom step types ("trade", "other") successfully');
+
+    const tradeCampId = customStepsCampData.campaign_id;
+
+    // Create user session token to query tracking API
+    const userSessionToken = 'user_test_token_m11_' + Date.now();
+    const tradeUserId = 'usr_m11_trade_' + Date.now();
+    db.prepare(`
+      INSERT INTO users (id, email, name, password_hash, salt, referral_code, created_at, updated_at)
+      VALUES (?, 'tradeuser@roycash.sec', 'Trade User', 'h', 's', ?, ?, ?)
+    `).run(tradeUserId, `REF_TRADE_${Date.now()}`, now, now);
+
+    db.prepare(`
+      INSERT INTO sessions (id, user_id, token, expires_at, created_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run('sess_' + Date.now(), tradeUserId, userSessionToken, new Date(Date.now() + 86400000).toISOString(), now);
+
+    // Create click for trade campaign
+    const clickRes = await fetch(`${BASE_URL}/api/offers/click`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': ORIGIN,
+        'Authorization': `Bearer ${userSessionToken}`,
+      },
+      body: JSON.stringify({ campaign_id: tradeCampId }),
+    });
+    const clickData = await clickRes.json();
+    assert(clickRes.status === 200 && clickData.click_id, 'Generated tracking click for custom step campaign');
+
+    const tradeClickId = clickData.click_id;
+
+    // Fetch tracking details and verify timeline items
+    const trackingRes = await fetch(`${BASE_URL}/api/offers/tracking/${tradeClickId}`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${userSessionToken}`,
+      },
+    });
+    const trackingData = await trackingRes.json();
+    assert(trackingRes.status === 200 && Array.isArray(trackingData.tracking?.timeline), 'Public tracking API returned dynamic timeline from campaign_steps');
+
+    const timelineItems = trackingData.tracking.timeline;
+    const hasTradeStep = timelineItems.some((t: any) => t.type === 'trade' && t.is_required === true);
+    const hasOtherOptionalStep = timelineItems.some((t: any) => t.type === 'other' && t.is_required === false);
+    assert(hasTradeStep && hasOtherOptionalStep, 'Dynamic tracking timeline correctly displays required "trade" and optional "other" steps in correct order');
+
+    // Send postbacks for install, signup, trade (skipping optional other step)
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${tradeClickId}&event_type=install&tx_id=tx_trade_1&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${tradeClickId}&event_type=signup&tx_id=tx_trade_2&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${tradeClickId}&event_type=trade&tx_id=tx_trade_3&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+
+    // Optional step skipped, all required steps completed -> approve conversion succeeds
+    const tradeApproval = approveConversion(tradeClickId, tradeUserId, 750, 'tx_trade_3', now);
+    assert(tradeApproval.success === true, 'Conversion approval succeeds when all required steps (including custom "trade") are verified, even if optional step is skipped');
+
+    // D. Unverified Live Redirect Blocking Test
+    const liveRedirectRes = await fetch(`${BASE_URL}/api/offers/redirect/${liveClickId}`, {
+      method: 'GET',
+    });
+    assert(liveRedirectRes.status === 403, 'Redirecting to unverified live campaign URL rejected with 403 Forbidden');
+
   } finally {
     // =========================================================================
     // CLEANUP ISOLATED TEST SERVER & DATABASE FILES
