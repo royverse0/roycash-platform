@@ -911,6 +911,59 @@ async function runComprehensiveSecuritySuite() {
     const normalApproval = approveConversion(normalClickId, validUserId, 400, 'tx_norm_2', now);
     assert(normalApproval.success === true, 'M1.2-9: Existing normal campaigns with unique step types ("install", "signup") continue working seamlessly');
 
+    // TEST 11: Unverified event cannot cause a later verified event to be assigned to the wrong duplicate step
+    const unvDupCampId = 'cmp_m12_unvdup_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, created_at, updated_at)
+      VALUES (?, 'Unverified Isolation Camp', 'UnvCorp', 'Trading', 'Test', 300, 'https://unv.com', 1, ?, ?)
+    `).run(unvDupCampId, now, now);
+
+    const unvStep1 = 'step_unv_d1_' + Date.now();
+    const unvStep2 = 'step_unv_d2_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 1, 'trade', 'First Trade', 'First trade', 1, ?)
+    `).run(unvStep1, unvDupCampId, now);
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 2, 'trade', 'Second Trade', 'Second trade', 1, ?)
+    `).run(unvStep2, unvDupCampId, now);
+
+    const unvDupClickId = 'rc_click_unvdup_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(unvDupClickId, tradeUserId, unvDupCampId, now);
+
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 300, 'INR', ?, ?)
+    `).run('cnv_unvdup_' + Date.now(), unvDupClickId, tradeUserId, unvDupCampId, now, now);
+
+    // Insert an unverified event (is_provider_verified = 0) with step_type='trade' (no step_id)
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'trade', 'Unverified Trade', 'confirmed', 'tx_unv_fake', '{}', 0, 'unverified_client', ?, ?)
+    `).run('evt_unv_fake_' + Date.now(), unvDupClickId, tradeUserId, unvDupCampId, now, now);
+
+    // Send a valid verified postback via /api/postback/mitgo
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${unvDupClickId}&event_type=trade&tx_id=tx_v1_verified&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+
+    // Verify the newly recorded event was assigned to Step 1 (unvStep1), NOT Step 2
+    const recordedVerifiedEvt = db.prepare(`
+      SELECT step_id FROM offer_events WHERE click_id = ? AND transaction_id = 'tx_v1_verified'
+    `).get(unvDupClickId) as any;
+    assert(recordedVerifiedEvt && recordedVerifiedEvt.step_id === unvStep1, 'M1.2-11: Unverified event does not reserve Step 1; first verified event correctly attaches to Step 1');
+
+    // Verify tracking endpoint shows Step 1 as completed by verified event and Step 2 as action_required
+    const unvDupTrackingRes = await fetch(`${BASE_URL}/api/offers/tracking/${unvDupClickId}`, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${userSessionToken}` },
+    });
+    const unvDupTimelineData = await unvDupTrackingRes.json();
+    const unvTimeline = unvDupTimelineData.tracking?.timeline || [];
+    assert(unvTimeline.length >= 2 && unvTimeline[0].state === 'completed' && unvTimeline[1].state === 'action_required', 'M1.2-11b: Unverified event is excluded from tracking timeline and does not pollute step status');
+
   } finally {
     // =========================================================================
     // CLEANUP ISOLATED TEST SERVER & DATABASE FILES

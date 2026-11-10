@@ -474,9 +474,14 @@ export function matchEventsToSteps(
   const stepAssignments = new Map<string, EventRow>();
   const usedEventIds = new Set<string>();
 
+  // Defense-in-depth: Filter out any unverified events (is_provider_verified must be 1 / true)
+  const verifiedOnlyEvents = (authenticatedEvents || []).filter(
+    (e) => e.is_provider_verified === 1 || e.is_provider_verified === true
+  );
+
   // Pass 1: Match events that have an explicit matching step_id
   for (const step of sortedSteps) {
-    const explicitEvt = authenticatedEvents.find(
+    const explicitEvt = verifiedOnlyEvents.find(
       (e) => !usedEventIds.has(e.id) && e.step_id === step.id && e.step_type.toLowerCase() === step.step_type.toLowerCase()
     );
     if (explicitEvt) {
@@ -489,7 +494,7 @@ export function matchEventsToSteps(
   for (const step of sortedSteps) {
     if (stepAssignments.has(step.id)) continue;
 
-    const typeEvt = authenticatedEvents.find(
+    const typeEvt = verifiedOnlyEvents.find(
       (e) => !usedEventIds.has(e.id) && e.step_type.toLowerCase() === step.step_type.toLowerCase()
     );
     if (typeEvt) {
@@ -957,7 +962,7 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
     }
 
     if (!resolvedStepId && configuredStepsForCamp.length > 0) {
-      const existingConfirmed = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')").all(clickId) as unknown as EventRow[];
+      const existingConfirmed = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed') AND is_provider_verified = 1").all(clickId) as unknown as EventRow[];
       const currentMap = matchEventsToSteps(configuredStepsForCamp, existingConfirmed);
       for (const stp of configuredStepsForCamp) {
         if (stp.step_type.toLowerCase() === eventType.toLowerCase() && !currentMap.stepAssignments.has(stp.id)) {
@@ -2353,7 +2358,7 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
     }
 
     if (!resolvedStepId && configuredStepsForCamp.length > 0) {
-      const existingConfirmed = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')").all(click_id) as unknown as EventRow[];
+      const existingConfirmed = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed') AND is_provider_verified = 1").all(click_id) as unknown as EventRow[];
       const currentMap = matchEventsToSteps(configuredStepsForCamp, existingConfirmed);
       for (const stp of configuredStepsForCamp) {
         if (stp.step_type.toLowerCase() === event_type.toLowerCase() && !currentMap.stepAssignments.has(stp.id)) {
@@ -2382,7 +2387,7 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
 
     // If event is approval, ensure required steps are confirmed first
     if (event_type === 'approval' || event_type === 'approved') {
-      const confirmedEvents = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')").all(click_id) as unknown as EventRow[];
+      const confirmedEvents = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed') AND is_provider_verified = 1").all(click_id) as unknown as EventRow[];
 
       let postMatch: StepMatchResult;
       if (configuredStepsForCamp.length > 0) {
