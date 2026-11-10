@@ -1552,9 +1552,9 @@ apiRouter.post('/user/withdraw', requireAuth, (req: AuthenticatedRequest, res: R
 
       // Debit from ledger immediately to hold funds
       db.prepare(`
-        INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-        VALUES (?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held Pending Review', ?)
-      `).run(ledgerId, userId, withdrawAmount, now);
+        INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+        VALUES (?, ?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held Pending Review', ?)
+      `).run(ledgerId, userId, withdrawalId, withdrawAmount, now);
 
       db.exec('COMMIT;');
     } catch (txErr) {
@@ -2302,10 +2302,10 @@ apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res:
           error: 'A valid payment reference / UTR is required to mark a withdrawal as paid.',
         });
       }
-      if (!admin_confirmation) {
+      if (admin_confirmation !== true) {
         return res.status(400).json({
           success: false,
-          error: 'Explicit admin confirmation that payment has been sent and verified is required.',
+          error: 'Explicit admin confirmation (admin_confirmation: true) that payment has been sent and verified is required.',
         });
       }
     }
@@ -2331,19 +2331,47 @@ apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res:
         });
       }
 
+      // 1. Verify withdrawal hold before rejection
+      if (status === 'rejected') {
+        const holdEntry = db.prepare(`
+          SELECT id, amount, user_id FROM cashback_ledger
+          WHERE withdrawal_id = ? AND type = 'withdrawal_debit' AND user_id = ?
+        `).get(withdrawalId, currentWdr.user_id) as any;
+
+        if (!holdEntry || Math.abs(holdEntry.amount - currentWdr.amount) > 0.001) {
+          db.exec('ROLLBACK;');
+          return res.status(400).json({
+            success: false,
+            error: 'Rejection failed: Valid matching withdrawal_debit hold not found or amount mismatched.',
+          });
+        }
+      }
+
       // Conditional update using previous status to prevent race conditions & ensure idempotency
-      const updateResult = db.prepare(`
-        UPDATE withdrawal_requests
-        SET status = ?, reference_id = ?, rejection_reason = ?, processed_at = ?
-        WHERE id = ? AND status = ?
-      `).run(
-        status,
-        status === 'paid' ? reference_id.trim() : null,
-        status === 'rejected' ? rejection_reason.trim() : null,
-        now,
-        withdrawalId,
-        currentStatus
-      );
+      let updateResult;
+      try {
+        updateResult = db.prepare(`
+          UPDATE withdrawal_requests
+          SET status = ?, reference_id = ?, rejection_reason = ?, processed_at = ?
+          WHERE id = ? AND status = ?
+        `).run(
+          status,
+          status === 'paid' ? reference_id.trim() : null,
+          status === 'rejected' ? rejection_reason.trim() : null,
+          now,
+          withdrawalId,
+          currentStatus
+        );
+      } catch (err: any) {
+        db.exec('ROLLBACK;');
+        if (err.message && err.message.includes('UNIQUE constraint failed')) {
+          return res.status(400).json({
+            success: false,
+            error: 'Payment reference / UTR has already been used for another withdrawal request.',
+          });
+        }
+        throw err;
+      }
 
       if (updateResult.changes === 0) {
         db.exec('ROLLBACK;');
@@ -2353,47 +2381,66 @@ apiRouter.put('/admin/withdrawals/:id/status', requireAdmin, (req: Request, res:
         });
       }
 
-      // If rejected, refund held amount exactly once
+      // If rejected, refund held amount exactly once, leveraging database unique index idx_ledger_refund_withdrawal
       if (status === 'rejected') {
-        const existingRefund = db.prepare(`
-          SELECT id FROM cashback_ledger
-          WHERE user_id = ? AND type = 'admin_adjustment' AND description LIKE ?
-        `).get(currentWdr.user_id, `%(${withdrawalId})%`);
-
-        if (!existingRefund) {
-          const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
+        const ledgerId = 'ldg_' + crypto.randomBytes(8).toString('hex');
+        try {
           db.prepare(`
-            INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-            VALUES (?, ?, 'admin_adjustment', ?, 'withdrawable', 'available', ?, ?)
+            INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+            VALUES (?, ?, ?, 'admin_adjustment', ?, 'withdrawable', 'available', ?, ?)
           `).run(
             ledgerId,
             currentWdr.user_id,
+            withdrawalId,
             currentWdr.amount,
             `Refund of Rejected Withdrawal Request (${withdrawalId})`,
             now
           );
+        } catch (err: any) {
+          db.exec('ROLLBACK;');
+          if (err.message && err.message.includes('UNIQUE constraint failed')) {
+            return res.status(400).json({
+              success: false,
+              error: 'Refund already processed for this withdrawal request.',
+            });
+          }
+          throw err;
         }
       }
 
-      db.exec('COMMIT;');
-    } catch (txErr) {
-      db.exec('ROLLBACK;');
-      throw txErr;
-    }
-
-    logAdminActivity(
-      adminId,
-      'WITHDRAWAL_STATUS_UPDATED',
-      {
+      // Write audit log inside the same transaction
+      const logId = `log_${crypto.randomBytes(12).toString('hex')}`;
+      const detailsObj = {
         withdrawal_id: withdrawalId,
         previous_status: currentStatus,
         new_status: status,
         reference_id: status === 'paid' ? reference_id.trim() : null,
         rejection_reason: status === 'rejected' ? rejection_reason.trim() : null,
-      },
-      req.ip,
-      req.headers['user-agent'] as string
-    );
+      };
+
+      try {
+        db.prepare(`
+          INSERT INTO admin_activity_logs (id, admin_id, action, details, ip_address, user_agent, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          logId,
+          adminId,
+          'WITHDRAWAL_STATUS_UPDATED',
+          JSON.stringify(detailsObj),
+          req.ip || 'internal',
+          req.headers['user-agent'] || 'server',
+          now
+        );
+      } catch (auditErr) {
+        db.exec('ROLLBACK;');
+        throw auditErr;
+      }
+
+      db.exec('COMMIT;');
+    } catch (txErr: any) {
+      db.exec('ROLLBACK;');
+      return res.status(400).json({ success: false, error: txErr.message || 'Failed to update withdrawal status.' });
+    }
 
     return res.json({ success: true, message: `Withdrawal request successfully updated to ${status}.` });
   } catch (err: any) {

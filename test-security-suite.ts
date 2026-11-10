@@ -978,7 +978,7 @@ async function runComprehensiveSecuritySuite() {
 
     db.prepare(`
       INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-      VALUES (?, ?, 'cashback', 1000, 'withdrawable', 'available', 'Initial balance', ?)
+      VALUES (?, ?, 'cashback_credit', 1000, 'withdrawable', 'available', 'Initial balance', ?)
     `).run('ldg_init_' + Date.now(), wdrTestUserId, now);
 
     const testWdrId = 'wdr_test_' + Date.now();
@@ -989,9 +989,9 @@ async function runComprehensiveSecuritySuite() {
     `).run(testWdrId, wdrTestUserId, testWdrAmount, now);
 
     db.prepare(`
-      INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-      VALUES (?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held', ?)
-    `).run('ldg_debit_' + Date.now(), wdrTestUserId, testWdrAmount, now);
+      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held', ?)
+    `).run('ldg_debit_' + Date.now(), wdrTestUserId, testWdrId, testWdrAmount, now);
 
     const nonAdminWdrRes = await fetch(`${BASE_URL}/api/admin/withdrawals`, {
       headers: { Cookie: `session_token=${userSessionToken}` },
@@ -1059,15 +1059,71 @@ async function runComprehensiveSecuritySuite() {
     });
     assert(paidTwiceRes.status === 400, 'M1.3-6: Paid request cannot be paid twice');
 
+    // Test missing hold rejection
+    const missingHoldWdrId = 'wdr_missing_hold_' + Date.now();
+    db.prepare(`
+      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "missinghold@paytm"}', 'pending', ?)
+    `).run(missingHoldWdrId, wdrTestUserId, 200, now);
+
+    const missingHoldRejRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${missingHoldWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'rejected', rejection_reason: 'No hold' }),
+    });
+    assert(missingHoldRejRes.status === 400, 'M1.3-15: Rejection without valid withdrawal_debit hold is rejected with 400');
+
+    // Test amount-mismatched hold rejection
+    const mismatchHoldWdrId = 'wdr_mismatch_hold_' + Date.now();
+    db.prepare(`
+      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "mismatch@paytm"}', 'pending', ?)
+    `).run(mismatchHoldWdrId, wdrTestUserId, 200, now);
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'withdrawal_debit', 100, 'withdrawable', 'deducted', 'Mismatched Hold', ?)
+    `).run('ldg_debit_mismatch_' + Date.now(), wdrTestUserId, mismatchHoldWdrId, now);
+
+    const mismatchRejRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${mismatchHoldWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'rejected', rejection_reason: 'Mismatched hold amount' }),
+    });
+    assert(mismatchRejRes.status === 400, 'M1.3-16: Rejection with amount-mismatched withdrawal_debit hold is rejected with 400');
+
+    // Test duplicate UTR rejection
+    const testWdrId2 = 'wdr_test2_' + Date.now();
+    db.prepare(`
+      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "upi2@paytm"}', 'approved', ?)
+    `).run(testWdrId2, wdrTestUserId, 100, now);
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'withdrawal_debit', 100, 'withdrawable', 'deducted', 'Hold 2', ?)
+    `).run('ldg_debit2_' + Date.now(), wdrTestUserId, testWdrId2, now);
+
+    await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId2}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'processing' }),
+    });
+
+    const duplicateUtrRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${testWdrId2}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'paid', reference_id: 'UTR_TEST_999', admin_confirmation: true }),
+    });
+    assert(duplicateUtrRes.status === 400, 'M1.3-17: Reusing an existing payment reference (UTR) is rejected with 400');
+
     const rejectWdrId = 'wdr_reject_' + Date.now();
     db.prepare(`
       INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
       VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "secretupi@paytm"}', 'pending', ?)
     `).run(rejectWdrId, wdrTestUserId, 300, now);
     db.prepare(`
-      INSERT INTO cashback_ledger (id, user_id, type, amount, balance_type, status, description, created_at)
-      VALUES (?, ?, 'withdrawal_debit', 300, 'withdrawable', 'deducted', 'Payout Request Held', ?)
-    `).run('ldg_debit_rej_' + Date.now(), wdrTestUserId, now);
+      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'withdrawal_debit', ?, 'withdrawable', 'deducted', 'Payout Request Held', ?)
+    `).run('ldg_debit_rej_' + Date.now(), wdrTestUserId, rejectWdrId, 300, now);
 
     const rejectRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${rejectWdrId}/status`, {
       method: 'PUT',
@@ -1078,9 +1134,9 @@ async function runComprehensiveSecuritySuite() {
     assert(rejectRes.status === 200 && rejectJson.success, 'M1.3-7a: Rejected request succeeds with rejection reason');
 
     const refundEntries = db.prepare(`
-      SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'admin_adjustment' AND description LIKE ?
-    `).all(wdrTestUserId, `%(${rejectWdrId})%`);
-    assert(refundEntries.length === 1, 'M1.3-7b: Rejected request refunds held amount exactly once');
+      SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'admin_adjustment' AND withdrawal_id = ?
+    `).all(wdrTestUserId, rejectWdrId);
+    assert(refundEntries.length === 1, 'M1.3-7b: Rejected request refunds held amount exactly once via withdrawal_id');
 
     const rejectAfterRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${rejectWdrId}/status`, {
       method: 'PUT',
@@ -1098,7 +1154,7 @@ async function runComprehensiveSecuritySuite() {
       SELECT COALESCE(SUM(CASE WHEN status = 'available' THEN amount ELSE -amount END), 0) as bal
       FROM cashback_ledger WHERE user_id = ? AND balance_type = 'withdrawable'
     `).get(wdrTestUserId) as any).bal;
-    assert(typeof userLedgerSum === 'number', 'M1.3-14: Existing wallet balance calculations remain correct after transitions');
+    assert(userLedgerSum === 300, 'M1.3-14: Exact wallet balance calculation is correct after transitions (1000 initial - 500 paid - 300 held - 100 hold - 100 hold2 + 300 refunded = 300)');
 
   } finally {
     // =========================================================================

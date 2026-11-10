@@ -265,6 +265,7 @@ export function initDatabase() {
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
       conversion_id TEXT,
+      withdrawal_id TEXT,
       type TEXT NOT NULL,
       amount REAL NOT NULL,
       balance_type TEXT NOT NULL,
@@ -272,7 +273,8 @@ export function initDatabase() {
       description TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (conversion_id) REFERENCES conversions(id) ON DELETE SET NULL
+      FOREIGN KEY (conversion_id) REFERENCES conversions(id) ON DELETE SET NULL,
+      FOREIGN KEY (withdrawal_id) REFERENCES withdrawal_requests(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS withdrawal_requests (
@@ -386,6 +388,21 @@ export function initDatabase() {
     db.exec(`ALTER TABLE offer_events ADD COLUMN step_id TEXT REFERENCES campaign_steps(id) ON DELETE SET NULL;`);
   } catch {
     // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE cashback_ledger ADD COLUMN withdrawal_id TEXT REFERENCES withdrawal_requests(id) ON DELETE SET NULL;`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_refund_withdrawal ON cashback_ledger(withdrawal_id) WHERE type = 'admin_adjustment';`);
+  } catch {
+    // Index already exists
+  }
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_withdrawal_reference_unique ON withdrawal_requests(reference_id) WHERE reference_id IS NOT NULL AND reference_id != '';`);
+  } catch {
+    // Index already exists
   }
 
   initSystemSettings();
