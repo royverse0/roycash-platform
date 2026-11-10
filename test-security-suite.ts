@@ -692,6 +692,225 @@ async function runComprehensiveSecuritySuite() {
     });
     assert(liveRedirectRes.status === 403, 'Redirecting to unverified live campaign URL rejected with 403 Forbidden');
 
+    // =========================================================================
+    // 6. MILESTONE 1.2: DUPLICATE CAMPAIGN STEP TRACKING & APPROVAL TESTS
+    // =========================================================================
+    console.log('\n--- 6. Milestone 1.2: Duplicate Campaign Step Tracking & Approval ---');
+
+    // TEST 1: One required "trade" step with one confirmed event -> CAN PASS
+    const singleTradeCampId = 'cmp_m12_single_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, created_at, updated_at)
+      VALUES (?, 'Single Trade Camp', 'SingleCorp', 'Finance', 'Test', 200, 'https://single.com', 1, ?, ?)
+    `).run(singleTradeCampId, now, now);
+
+    const stepS1 = 'step_s1_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 1, 'trade', 'First Trade', 'Complete 1 trade', 1, ?)
+    `).run(stepS1, singleTradeCampId, now);
+
+    const singleTradeClickId = 'rc_click_s1_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(singleTradeClickId, validUserId, singleTradeCampId, now);
+
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 200, 'INR', ?, ?)
+    `).run('cnv_s1_' + Date.now(), singleTradeClickId, validUserId, singleTradeCampId, now, now);
+
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${singleTradeClickId}&event_type=trade&tx_id=tx_s1_1&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    const singleTradeApproval = approveConversion(singleTradeClickId, validUserId, 200, 'tx_s1_1', now);
+    assert(singleTradeApproval.success === true, 'M1.2-1: One required "trade" step with one confirmed event can pass approval');
+
+    // TEST 2: Two required "trade" steps with only ONE confirmed event -> MUST FAIL
+    const doubleTradeCampId = 'cmp_m12_double_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, created_at, updated_at)
+      VALUES (?, 'Double Trade Camp', 'DoubleCorp', 'Finance', 'Test', 500, 'https://double.com', 1, ?, ?)
+    `).run(doubleTradeCampId, now, now);
+
+    const stepD1 = 'step_d1_' + Date.now();
+    const stepD2 = 'step_d2_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 1, 'trade', 'Trade Step 1', 'First trade', 1, ?)
+    `).run(stepD1, doubleTradeCampId, now);
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 2, 'trade', 'Trade Step 2', 'Second trade', 1, ?)
+    `).run(stepD2, doubleTradeCampId, now);
+
+    const doubleTradeClickId = 'rc_click_d1_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(doubleTradeClickId, tradeUserId, doubleTradeCampId, now);
+
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
+    `).run('cnv_d1_' + Date.now(), doubleTradeClickId, tradeUserId, doubleTradeCampId, now, now);
+
+    // Send only 1 trade event for double trade campaign
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${doubleTradeClickId}&event_type=trade&tx_id=tx_d1_1&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    const doubleTrade1EventApproval = approveConversion(doubleTradeClickId, tradeUserId, 500, 'tx_d1_1', now);
+    assert(doubleTrade1EventApproval.success === false && doubleTrade1EventApproval.error?.toLowerCase().includes('missing required steps'), 'M1.2-2: Two required "trade" steps with only ONE confirmed event fails approval (missing Step 2)');
+
+    // TEST 10: Timeline must show duplicate steps separately and only mark the assigned step completed
+    const doubleTradeTrackingRes1 = await fetch(`${BASE_URL}/api/offers/tracking/${doubleTradeClickId}`, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${userSessionToken}` },
+    });
+    const doubleTradeTrackingData1 = await doubleTradeTrackingRes1.json();
+    const dTimeline1 = doubleTradeTrackingData1.tracking?.timeline || [];
+
+    const dStep1 = dTimeline1.find((t: any) => t.step_id === stepD1);
+    const dStep2 = dTimeline1.find((t: any) => t.step_id === stepD2);
+    assert(
+      dStep1 && dStep2 && dStep1.state === 'completed' && dStep2.state === 'action_required',
+      'M1.2-10: Tracking timeline displays duplicate steps separately (Step 1 is completed, Step 2 is action_required)'
+    );
+
+    // TEST 3: Two required "trade" steps with two independently verified and mapped events -> CAN PASS
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${doubleTradeClickId}&event_type=trade&tx_id=tx_d1_2&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    const doubleTrade2EventApproval = approveConversion(doubleTradeClickId, tradeUserId, 500, 'tx_d1_2', now);
+    assert(doubleTrade2EventApproval.success === true, 'M1.2-3: Two required "trade" steps with TWO independently verified events can pass approval');
+
+    // TEST 4: One required and one optional "trade" step -> required step can pass without falsely marking optional step complete
+    const reqOptCampId = 'cmp_m12_reqopt_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, created_at, updated_at)
+      VALUES (?, 'Req Opt Trade Camp', 'ReqOptCorp', 'Finance', 'Test', 300, 'https://reqopt.com', 1, ?, ?)
+    `).run(reqOptCampId, now, now);
+
+    const stepRO1 = 'step_ro1_' + Date.now();
+    const stepRO2 = 'step_ro2_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 1, 'trade', 'Required Trade', 'Must do', 1, ?)
+    `).run(stepRO1, reqOptCampId, now);
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 2, 'trade', 'Optional Second Trade', 'Optional bonus trade', 0, ?)
+    `).run(stepRO2, reqOptCampId, now);
+
+    const reqOptClickId = 'rc_click_ro1_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(reqOptClickId, tradeUserId, reqOptCampId, now);
+
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 300, 'INR', ?, ?)
+    `).run('cnv_ro1_' + Date.now(), reqOptClickId, tradeUserId, reqOptCampId, now, now);
+
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${reqOptClickId}&event_type=trade&tx_id=tx_ro_1&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    const reqOptApproval = approveConversion(reqOptClickId, tradeUserId, 300, 'tx_ro_1', now);
+    assert(reqOptApproval.success === true, 'M1.2-4: Required trade step passes approval even when optional second trade step is unfulfilled');
+
+    const reqOptTrackingRes = await fetch(`${BASE_URL}/api/offers/tracking/${reqOptClickId}`, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${userSessionToken}` },
+    });
+    const reqOptTrackingData = await reqOptTrackingRes.json();
+    const roTimeline = reqOptTrackingData.tracking?.timeline || [];
+    const roStep1 = roTimeline.find((t: any) => t.step_id === stepRO1);
+    const roStep2 = roTimeline.find((t: any) => t.step_id === stepRO2);
+    assert(
+      roStep1 && roStep2 && roStep1.state === 'completed' && roStep2.state === 'action_required',
+      'M1.2-4b: Required step is completed without falsely marking optional second trade step completed'
+    );
+
+    // TEST 5: Duplicate events/replayed postbacks -> must not create duplicate completion
+    const replayedPostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${doubleTradeClickId}&event_type=trade&tx_id=tx_d1_1&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    const replayedJson = await replayedPostbackRes.json();
+    assert(replayedJson.message?.includes('Duplicate transaction ignored'), 'M1.2-5: Replayed postback transaction ID is safely ignored without creating extra step completion');
+
+    // TEST 6: Incorrect step mapping -> fails safely
+    const invalidStepIdPostbackRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${doubleTradeClickId}&event_type=trade&step_id=non_existent_step_123&tx_id=tx_invalid_step_1&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    assert(invalidStepIdPostbackRes.status === 200, 'Postback with unresolvable step_id safely falls back to standard step matching without crashing');
+
+    // TEST 7: Unverified event -> must not complete a step
+    const unverifiedClickId = 'rc_click_unv_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(unverifiedClickId, validUserId, singleTradeCampId, now);
+
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 200, 'INR', ?, ?)
+    `).run('cnv_unv_' + Date.now(), unverifiedClickId, validUserId, singleTradeCampId, now, now);
+
+    // Directly insert an unverified event (is_provider_verified = 0) into offer_events
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, ?, 'trade', 'Fake Unverified Event', 'confirmed', 'tx_unv_1', '{}', 0, 'unverified_client', ?, ?)
+    `).run('evt_unv_' + Date.now(), unverifiedClickId, validUserId, singleTradeCampId, stepS1, now, now);
+
+    const unverifiedApproval = approveConversion(unverifiedClickId, validUserId, 200, 'tx_unv_1', now);
+    assert(unverifiedApproval.success === false && unverifiedApproval.error?.toLowerCase().includes('missing required steps'), 'M1.2-7: Unverified event (is_provider_verified = 0) does not complete a step and approval fails');
+
+    // TEST 8: Sandbox event on live campaign -> must fail
+    const liveCampClickId2 = 'rc_click_live2_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(liveCampClickId2, validUserId, liveCampId, now);
+
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 500, 'INR', ?, ?)
+    `).run('cnv_live2_' + Date.now(), liveCampClickId2, validUserId, liveCampId, now, now);
+
+    // Insert sandbox event for live campaign
+    db.prepare(`
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, 'install', 'Sandbox Event', 'sandbox_confirmed', 'tx_sandbox_live_1', '{}', 1, 'sandbox_postback', ?, ?)
+    `).run('evt_sandlive_' + Date.now(), liveCampClickId2, validUserId, liveCampId, now, now);
+
+    const sandboxOnLiveApproval = approveConversion(liveCampClickId2, validUserId, 500, 'tx_sandbox_live_1', now);
+    assert(sandboxOnLiveApproval.success === false, 'M1.2-8: Sandbox event on live campaign rejected by approveConversion()');
+
+    // TEST 9: Existing normal campaigns with unique step types continue working
+    const normalCampId = 'cmp_m12_normal_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaigns (id, name, advertiser_name, category, description, reward_amount, tracking_url_template, is_demo, created_at, updated_at)
+      VALUES (?, 'Normal Unique Step Camp', 'NormalCorp', 'Shopping', 'Test', 400, 'https://normal.com', 1, ?, ?)
+    `).run(normalCampId, now, now);
+
+    const normS1 = 'step_norm1_' + Date.now();
+    const normS2 = 'step_norm2_' + Date.now();
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 1, 'install', 'App Install', 'Install app', 1, ?)
+    `).run(normS1, normalCampId, now);
+    db.prepare(`
+      INSERT INTO campaign_steps (id, campaign_id, step_order, step_type, title, description, is_required, created_at)
+      VALUES (?, ?, 2, 'signup', 'Account Registration', 'Register account', 1, ?)
+    `).run(normS2, normalCampId, now);
+
+    const normalClickId = 'rc_click_norm_' + Date.now();
+    db.prepare(`
+      INSERT INTO offer_clicks (click_id, user_id, campaign_id, provider, created_at)
+      VALUES (?, ?, ?, 'mitgo', ?)
+    `).run(normalClickId, validUserId, normalCampId, now);
+
+    db.prepare(`
+      INSERT INTO conversions (id, click_id, user_id, campaign_id, provider, status, reward_amount, currency, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'mitgo', 'click_recorded', 400, 'INR', ?, ?)
+    `).run('cnv_norm_' + Date.now(), normalClickId, validUserId, normalCampId, now, now);
+
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${normalClickId}&event_type=install&tx_id=tx_norm_1&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+    await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${normalClickId}&event_type=signup&tx_id=tx_norm_2&token=valid_test_sandbox_secret_123`, { method: 'GET' });
+
+    const normalApproval = approveConversion(normalClickId, validUserId, 400, 'tx_norm_2', now);
+    assert(normalApproval.success === true, 'M1.2-9: Existing normal campaigns with unique step types ("install", "signup") continue working seamlessly');
+
   } finally {
     // =========================================================================
     // CLEANUP ISOLATED TEST SERVER & DATABASE FILES

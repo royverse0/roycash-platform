@@ -433,6 +433,86 @@ apiRouter.get('/offers/redirect/:clickId', (req: Request, res: Response) => {
   }
 });
 
+export interface ConfiguredStepRow {
+  id: string;
+  campaign_id: string;
+  step_order: number;
+  step_type: string;
+  title: string;
+  description: string;
+  is_required: number | boolean | string;
+  min_deposit_amount: number;
+}
+
+export interface EventRow {
+  id: string;
+  click_id: string;
+  user_id: string;
+  campaign_id: string;
+  step_id?: string | null;
+  step_type: string;
+  event_name?: string;
+  status: string;
+  transaction_id?: string;
+  is_provider_verified?: number | boolean;
+  verification_source?: string;
+  verified_at?: string;
+  created_at?: string;
+}
+
+export interface StepMatchResult {
+  stepAssignments: Map<string, EventRow>;
+  missingRequiredSteps: ConfiguredStepRow[];
+  allRequiredCompleted: boolean;
+}
+
+export function matchEventsToSteps(
+  configuredSteps: ConfiguredStepRow[],
+  authenticatedEvents: EventRow[]
+): StepMatchResult {
+  const sortedSteps = [...configuredSteps].sort((a, b) => (a.step_order || 0) - (b.step_order || 0));
+  const stepAssignments = new Map<string, EventRow>();
+  const usedEventIds = new Set<string>();
+
+  // Pass 1: Match events that have an explicit matching step_id
+  for (const step of sortedSteps) {
+    const explicitEvt = authenticatedEvents.find(
+      (e) => !usedEventIds.has(e.id) && e.step_id === step.id && e.step_type.toLowerCase() === step.step_type.toLowerCase()
+    );
+    if (explicitEvt) {
+      stepAssignments.set(step.id, explicitEvt);
+      usedEventIds.add(explicitEvt.id);
+    }
+  }
+
+  // Pass 2: For steps not yet assigned, match unassigned events by step_type sequentially
+  for (const step of sortedSteps) {
+    if (stepAssignments.has(step.id)) continue;
+
+    const typeEvt = authenticatedEvents.find(
+      (e) => !usedEventIds.has(e.id) && e.step_type.toLowerCase() === step.step_type.toLowerCase()
+    );
+    if (typeEvt) {
+      stepAssignments.set(step.id, typeEvt);
+      usedEventIds.add(typeEvt.id);
+    }
+  }
+
+  const missingRequiredSteps: ConfiguredStepRow[] = [];
+  for (const step of sortedSteps) {
+    const isReq = Boolean(step.is_required) && String(step.is_required) !== '0' && String(step.is_required) !== 'false';
+    if (isReq && !stepAssignments.has(step.id)) {
+      missingRequiredSteps.push(step);
+    }
+  }
+
+  return {
+    stepAssignments,
+    missingRequiredSteps,
+    allRequiredCompleted: missingRequiredSteps.length === 0,
+  };
+}
+
 // LIVE OFFER TRACKING SCREEN DATA
 apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -459,26 +539,25 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
     }
 
     // Fetch campaign steps ordered by step_order ASC
-    const steps = db.prepare('SELECT * FROM campaign_steps WHERE campaign_id = ? ORDER BY step_order ASC').all(click.campaign_id) as any[];
+    const steps = db.prepare('SELECT * FROM campaign_steps WHERE campaign_id = ? ORDER BY step_order ASC').all(click.campaign_id) as unknown as ConfiguredStepRow[];
 
-    // Fetch verified events
-    const events = db.prepare('SELECT * FROM offer_events WHERE click_id = ? ORDER BY created_at ASC').all(click.click_id) as any[];
+    // Fetch verified events (strictly requiring is_provider_verified === 1)
+    const rawEvents = db.prepare('SELECT * FROM offer_events WHERE click_id = ? ORDER BY created_at ASC').all(click.click_id) as unknown as EventRow[];
 
-    const completedStepTypes = new Set(
-      events
-        .filter((e) => e.status === 'confirmed' || e.status === 'sandbox_confirmed')
-        .map((e) => e.step_type.toLowerCase())
-    );
+    // Include only confirmed or sandbox_confirmed events that are provider verified
+    const verifiedEvents = rawEvents.filter((e) => (e.status === 'confirmed' || e.status === 'sandbox_confirmed') && (e.is_provider_verified === 1 || e.is_provider_verified === true));
 
-    // Determine current timeline status for each step dynamically from campaign_steps
+    // Determine current timeline status for each step dynamically using 1-to-1 event matching
     const timeline = [];
     let priorRequiredDone = true;
 
     if (steps.length > 0) {
+      const matchResult = matchEventsToSteps(steps, verifiedEvents);
+
       steps.forEach((step, idx) => {
-        const stepType = (step.step_type || 'other').toLowerCase();
-        const isDone = completedStepTypes.has(stepType);
-        const isReq = step.is_required === 1 || step.is_required === true || String(step.is_required) === '1';
+        const assignedEvt = matchResult.stepAssignments.get(step.id);
+        const isDone = Boolean(assignedEvt);
+        const isReq = Boolean(step.is_required) && String(step.is_required) !== '0' && String(step.is_required) !== 'false';
 
         let statusText = '';
         let stateStr = '';
@@ -495,8 +574,9 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
         }
 
         timeline.push({
+          step_id: step.id,
           step_order: step.step_order || (idx + 1),
-          type: stepType,
+          type: (step.step_type || 'other').toLowerCase(),
           title: `${idx + 1}. ${step.title}`,
           status: statusText,
           state: stateStr,
@@ -505,6 +585,8 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
             : step.description || `Complete ${step.title} step.`,
           is_required: isReq,
           min_deposit_amount: step.min_deposit_amount || 0,
+          event_id: assignedEvt?.id || null,
+          transaction_id: assignedEvt?.transaction_id || null,
         });
 
         if (isReq && !isDone) {
@@ -513,75 +595,37 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
       });
     } else {
       // Legacy step construction fallback if campaign_steps row is empty
-      let stepIdx = 1;
+      const legacySteps: ConfiguredStepRow[] = [];
+      let ord = 1;
+      if (click.requires_install) legacySteps.push({ id: 'v_install', campaign_id: click.campaign_id, step_order: ord++, step_type: 'install', title: 'App Install', description: 'Download and open app.', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_signup) legacySteps.push({ id: 'v_signup', campaign_id: click.campaign_id, step_order: ord++, step_type: 'signup', title: 'Account Registration', description: 'Register account.', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_kyc) legacySteps.push({ id: 'v_kyc', campaign_id: click.campaign_id, step_order: ord++, step_type: 'kyc', title: 'Identity / KYC Verification', description: 'Complete KYC.', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_deposit) legacySteps.push({ id: 'v_deposit', campaign_id: click.campaign_id, step_order: ord++, step_type: 'deposit', title: `First Deposit / Purchase (Min ₹${click.minimum_deposit_amount})`, description: `Deposit ₹${click.minimum_deposit_amount}+.`, is_required: 1, min_deposit_amount: click.minimum_deposit_amount || 0 });
 
-      if (click.requires_install) {
-        const isDone = completedStepTypes.has('install');
-        timeline.push({
-          step_order: stepIdx,
-          type: 'install',
-          title: `${stepIdx}. App Install`,
-          status: isDone ? 'Install Completed' : 'Verifying Install',
-          state: isDone ? 'completed' : 'verifying',
-          instruction: isDone
-            ? 'Installation confirmed by provider.'
-            : 'Download and open the app. Waiting for advertiser install postback confirmation.',
-          is_required: true,
-        });
-        if (!isDone) priorRequiredDone = false;
-        stepIdx++;
-      }
+      const matchResult = matchEventsToSteps(legacySteps, verifiedEvents);
 
-      if (click.requires_signup) {
-        const isDone = completedStepTypes.has('signup');
-        timeline.push({
-          step_order: stepIdx,
-          type: 'signup',
-          title: `${stepIdx}. Account Registration`,
-          status: isDone ? 'Signup Completed' : priorRequiredDone ? 'Action Required' : 'Waiting for Install',
-          state: isDone ? 'completed' : priorRequiredDone ? 'action_required' : 'pending_prior',
-          instruction: isDone
-            ? 'Registration verified by advertiser.'
-            : 'Open the advertiser application and register with your mobile phone or email.',
-          is_required: true,
-        });
-        if (!isDone) priorRequiredDone = false;
-        stepIdx++;
-      }
+      legacySteps.forEach((step, idx) => {
+        const assignedEvt = matchResult.stepAssignments.get(step.id);
+        const isDone = Boolean(assignedEvt);
+        const statusText = isDone ? `${step.title} Completed` : priorRequiredDone ? 'Action Required' : 'Pending Previous Steps';
+        const stateStr = isDone ? 'completed' : priorRequiredDone ? 'action_required' : 'pending_prior';
 
-      if (click.requires_kyc) {
-        const isDone = completedStepTypes.has('kyc');
         timeline.push({
-          step_order: stepIdx,
-          type: 'kyc',
-          title: `${stepIdx}. Identity / KYC Verification`,
-          status: isDone ? 'KYC Completed' : priorRequiredDone ? 'Action Required' : 'Pending Previous Steps',
-          state: isDone ? 'completed' : priorRequiredDone ? 'action_required' : 'pending_prior',
-          instruction: isDone
-            ? 'Identity verification verified by advertiser records.'
-            : 'Complete in-app paperless KYC.',
+          step_id: step.id,
+          step_order: idx + 1,
+          type: step.step_type,
+          title: `${idx + 1}. ${step.title}`,
+          status: statusText,
+          state: stateStr,
+          instruction: isDone ? `${step.title} confirmed by provider.` : step.description,
           is_required: true,
+          min_deposit_amount: step.min_deposit_amount,
+          event_id: assignedEvt?.id || null,
+          transaction_id: assignedEvt?.transaction_id || null,
         });
-        if (!isDone) priorRequiredDone = false;
-        stepIdx++;
-      }
 
-      if (click.requires_deposit) {
-        const isDone = completedStepTypes.has('deposit');
-        timeline.push({
-          step_order: stepIdx,
-          type: 'deposit',
-          title: `${stepIdx}. First Deposit / Purchase (Min ₹${click.minimum_deposit_amount})`,
-          status: isDone ? 'Deposit Verified' : priorRequiredDone ? 'Action Required' : 'Pending Previous Steps',
-          state: isDone ? 'completed' : priorRequiredDone ? 'action_required' : 'pending_prior',
-          instruction: isDone
-            ? `Deposit of ₹${click.minimum_deposit_amount}+ confirmed by advertiser.`
-            : `Complete a minimum transaction/deposit of ₹${click.minimum_deposit_amount} inside the app.`,
-          is_required: true,
-        });
         if (!isDone) priorRequiredDone = false;
-        stepIdx++;
-      }
+      });
     }
 
     // Final Step: Cashback Settlement
@@ -623,7 +667,7 @@ apiRouter.get('/offers/tracking/:clickId', requireAuth, (req: AuthenticatedReque
         conversion_status: convStatus,
         rejection_reason: click.rejection_reason,
         timeline,
-        events,
+        events: rawEvents,
       },
     });
   } catch (err: any) {
@@ -900,16 +944,40 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
       return res.status(200).json({ success: true, message: 'Duplicate transaction ignored (idempotent).' });
     }
 
+    // Resolve step_id if explicitly provided or map to earliest unfulfilled step matching eventType
+    const configuredStepsForCamp = db.prepare('SELECT * FROM campaign_steps WHERE campaign_id = ? ORDER BY step_order ASC').all(click.campaign_id) as unknown as ConfiguredStepRow[];
+    let resolvedStepId: string | null = null;
+    const rawStepParam = params.step_id || params.step;
+
+    if (typeof rawStepParam === 'string' && rawStepParam.trim()) {
+      const matchedStep = configuredStepsForCamp.find((s) => s.id === rawStepParam.trim());
+      if (matchedStep) {
+        resolvedStepId = matchedStep.id;
+      }
+    }
+
+    if (!resolvedStepId && configuredStepsForCamp.length > 0) {
+      const existingConfirmed = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')").all(clickId) as unknown as EventRow[];
+      const currentMap = matchEventsToSteps(configuredStepsForCamp, existingConfirmed);
+      for (const stp of configuredStepsForCamp) {
+        if (stp.step_type.toLowerCase() === eventType.toLowerCase() && !currentMap.stepAssignments.has(stp.id)) {
+          resolvedStepId = stp.id;
+          break;
+        }
+      }
+    }
+
     // Record the verified event
     const eventId = 'evt_' + crypto.randomBytes(8).toString('hex');
     db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, ?, 1, 'sandbox_postback', ?, ?)
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, ?, 1, 'sandbox_postback', ?, ?)
     `).run(
       eventId,
       clickId,
       click.user_id,
       click.campaign_id,
+      resolvedStepId,
       eventType,
       eventType.toUpperCase() + ' Verified',
       txId,
@@ -918,32 +986,27 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
       now
     );
 
-    // Evaluate overall campaign step completion:
-    // Check specific campaign_steps if defined, otherwise check boolean flags
-    const configuredSteps = db.prepare(`
-      SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
-    `).all(click.campaign_id) as { step_type: string }[];
+    // Evaluate overall campaign step completion using 1-to-1 event matching
+    const allEventsAfterInsert = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed') AND is_provider_verified = 1").all(clickId) as unknown as EventRow[];
+    let allStepsCompleted = false;
+    let missingSteps: string[] = [];
 
-    const confirmedEvents = db.prepare(`
-      SELECT step_type FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')
-    `).all(clickId) as { step_type: string }[];
-    const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
-
-    const missingSteps: string[] = [];
-    if (configuredSteps.length > 0) {
-      for (const step of configuredSteps) {
-        if (!confirmedTypes.has(step.step_type.toLowerCase())) {
-          missingSteps.push(step.step_type);
-        }
-      }
+    if (configuredStepsForCamp.length > 0) {
+      const postMatch = matchEventsToSteps(configuredStepsForCamp, allEventsAfterInsert);
+      allStepsCompleted = postMatch.allRequiredCompleted;
+      missingSteps = postMatch.missingRequiredSteps.map((s) => s.title);
     } else {
-      if (click.requires_install && !confirmedTypes.has('install')) missingSteps.push('install');
-      if (click.requires_signup && !confirmedTypes.has('signup')) missingSteps.push('signup');
-      if (click.requires_kyc && !confirmedTypes.has('kyc')) missingSteps.push('kyc');
-      if (click.requires_deposit && !confirmedTypes.has('deposit')) missingSteps.push('deposit');
-    }
+      const legacySteps: ConfiguredStepRow[] = [];
+      let ord = 1;
+      if (click.requires_install) legacySteps.push({ id: 'v_install', campaign_id: click.campaign_id, step_order: ord++, step_type: 'install', title: 'App Install', description: '', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_signup) legacySteps.push({ id: 'v_signup', campaign_id: click.campaign_id, step_order: ord++, step_type: 'signup', title: 'Account Registration', description: '', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_kyc) legacySteps.push({ id: 'v_kyc', campaign_id: click.campaign_id, step_order: ord++, step_type: 'kyc', title: 'KYC Verification', description: '', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_deposit) legacySteps.push({ id: 'v_deposit', campaign_id: click.campaign_id, step_order: ord++, step_type: 'deposit', title: 'First Deposit', description: '', is_required: 1, min_deposit_amount: click.minimum_deposit_amount || 0 });
 
-    const allStepsCompleted = missingSteps.length === 0;
+      const postMatch = matchEventsToSteps(legacySteps, allEventsAfterInsert);
+      allStepsCompleted = postMatch.allRequiredCompleted;
+      missingSteps = postMatch.missingRequiredSteps.map((s) => s.title);
+    }
 
     // Handle Event Types
     if (eventType === 'rejected' || eventType === 'declined') {
@@ -1179,18 +1242,18 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
 
     // 4. PROVIDER EVENT AUTHENTICITY VERIFICATION
     const rawEvents = db.prepare(`
-      SELECT id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at
+      SELECT id, click_id, user_id, campaign_id, step_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at
       FROM offer_events
       WHERE click_id = ?
         AND user_id = ?
         AND campaign_id = ?
-    `).all(clickId, authoritativeUserId, conversion.campaign_id) as any[];
+    `).all(clickId, authoritativeUserId, conversion.campaign_id) as unknown as EventRow[];
 
     // Filter events to strictly enforce server-controlled provider verification
     const authenticatedEvents = rawEvents.filter((evt) => {
       // Must be marked verified by trusted server verification logic (is_provider_verified === 1)
       // Never trust client metadata fields like signature_valid: true or verified: true!
-      if (evt.is_provider_verified !== 1) {
+      if (evt.is_provider_verified !== 1 && evt.is_provider_verified !== true) {
         return false;
       }
 
@@ -1238,38 +1301,38 @@ export function approveConversion(clickId: string, userId: string, rewardAmount:
       }
     });
 
-    const confirmedTypes = new Set(authenticatedEvents.map((e) => e.step_type.toLowerCase()));
-
     const configuredSteps = db.prepare(`
-      SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
-    `).all(conversion.campaign_id) as { step_type: string }[];
+      SELECT * FROM campaign_steps WHERE campaign_id = ? ORDER BY step_order ASC
+    `).all(conversion.campaign_id) as unknown as ConfiguredStepRow[];
 
-    const missingSteps: string[] = [];
+    let matchResult: StepMatchResult;
+
     if (configuredSteps.length > 0) {
-      for (const step of configuredSteps) {
-        if (!confirmedTypes.has(step.step_type.toLowerCase())) {
-          missingSteps.push(step.step_type);
-        }
-      }
+      matchResult = matchEventsToSteps(configuredSteps, authenticatedEvents);
     } else {
-      if (click.requires_install && !confirmedTypes.has('install')) missingSteps.push('install');
-      if (click.requires_signup && !confirmedTypes.has('signup')) missingSteps.push('signup');
-      if (click.requires_kyc && !confirmedTypes.has('kyc')) missingSteps.push('kyc');
-      if (click.requires_deposit && !confirmedTypes.has('deposit')) missingSteps.push('deposit');
+      const legacySteps: ConfiguredStepRow[] = [];
+      let ord = 1;
+      if (click.requires_install) legacySteps.push({ id: 'v_install', campaign_id: click.campaign_id, step_order: ord++, step_type: 'install', title: 'App Install', description: '', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_signup) legacySteps.push({ id: 'v_signup', campaign_id: click.campaign_id, step_order: ord++, step_type: 'signup', title: 'Account Registration', description: '', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_kyc) legacySteps.push({ id: 'v_kyc', campaign_id: click.campaign_id, step_order: ord++, step_type: 'kyc', title: 'KYC Verification', description: '', is_required: 1, min_deposit_amount: 0 });
+      if (click.requires_deposit) legacySteps.push({ id: 'v_deposit', campaign_id: click.campaign_id, step_order: ord++, step_type: 'deposit', title: 'First Deposit', description: '', is_required: 1, min_deposit_amount: click.minimum_deposit_amount || 0 });
+
+      matchResult = matchEventsToSteps(legacySteps, authenticatedEvents);
     }
 
-    if (missingSteps.length > 0) {
+    if (!matchResult.allRequiredCompleted) {
+      const missingNames = matchResult.missingRequiredSteps.map((s) => `${s.title} (${s.step_type})`);
       db.prepare(`
         UPDATE conversions
         SET status = 'pending_unmet_steps', rejection_reason = ?, updated_at = ?
         WHERE click_id = ?
-      `).run(`Financial approval rejected: missing required steps: ${missingSteps.join(', ')}`, now, clickId);
+      `).run(`Financial approval rejected: missing required steps: ${missingNames.join(', ')}`, now, clickId);
 
       db.exec('COMMIT;');
       return {
         success: false,
-        error: `Approval rejected: campaign steps not completed. Missing required steps: ${missingSteps.join(', ')}.`,
-        missing_steps: missingSteps,
+        error: `Approval rejected: campaign steps not completed. Missing required steps: ${missingNames.join(', ')}.`,
+        missing_steps: missingNames,
       };
     }
 
@@ -2281,15 +2344,35 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
       });
     }
 
+    // Resolve step_id if provided or map to earliest unfulfilled step
+    const configuredStepsForCamp = db.prepare('SELECT * FROM campaign_steps WHERE campaign_id = ? ORDER BY step_order ASC').all(click.campaign_id) as unknown as ConfiguredStepRow[];
+    let resolvedStepId: string | null = null;
+    if (req.body.step_id && typeof req.body.step_id === 'string') {
+      const matchS = configuredStepsForCamp.find((s) => s.id === req.body.step_id.trim());
+      if (matchS) resolvedStepId = matchS.id;
+    }
+
+    if (!resolvedStepId && configuredStepsForCamp.length > 0) {
+      const existingConfirmed = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')").all(click_id) as unknown as EventRow[];
+      const currentMap = matchEventsToSteps(configuredStepsForCamp, existingConfirmed);
+      for (const stp of configuredStepsForCamp) {
+        if (stp.step_type.toLowerCase() === event_type.toLowerCase() && !currentMap.stepAssignments.has(stp.id)) {
+          resolvedStepId = stp.id;
+          break;
+        }
+      }
+    }
+
     // Insert simulated event with clear sandbox tags
     db.prepare(`
-      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, '{"sandbox_simulation": true, "environment": "development"}', 1, 'sandbox_simulation', ?, ?)
+      INSERT INTO offer_events (id, click_id, user_id, campaign_id, step_id, step_type, event_name, status, transaction_id, metadata, is_provider_verified, verification_source, verified_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'sandbox_confirmed', ?, '{"sandbox_simulation": true, "environment": "development"}', 1, 'sandbox_simulation', ?, ?)
     `).run(
       'evt_sim_' + crypto.randomBytes(8).toString('hex'),
       click_id,
       click.user_id,
       click.campaign_id,
+      resolvedStepId,
       event_type,
       `[SANDBOX] Simulated ${event_type.toUpperCase()} Event`,
       txId,
@@ -2299,35 +2382,29 @@ apiRouter.post('/admin/simulate-postback', requireAdmin, (req: Request, res: Res
 
     // If event is approval, ensure required steps are confirmed first
     if (event_type === 'approval' || event_type === 'approved') {
-      const configuredSteps = db.prepare(`
-        SELECT step_type FROM campaign_steps WHERE campaign_id = ? AND is_required = 1
-      `).all(click.campaign_id) as { step_type: string }[];
+      const confirmedEvents = db.prepare("SELECT * FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')").all(click_id) as unknown as EventRow[];
 
-      const confirmedEvents = db.prepare(`
-        SELECT step_type FROM offer_events WHERE click_id = ? AND status IN ('confirmed', 'sandbox_confirmed')
-      `).all(click_id) as { step_type: string }[];
-      const confirmedTypes = new Set(confirmedEvents.map((e) => e.step_type.toLowerCase()));
-
-      const missingSteps: string[] = [];
-      if (configuredSteps.length > 0) {
-        for (const step of configuredSteps) {
-          if (!confirmedTypes.has(step.step_type.toLowerCase())) {
-            missingSteps.push(step.step_type);
-          }
-        }
+      let postMatch: StepMatchResult;
+      if (configuredStepsForCamp.length > 0) {
+        postMatch = matchEventsToSteps(configuredStepsForCamp, confirmedEvents);
       } else {
         const fullCampaign = db.prepare('SELECT requires_install, requires_signup, requires_kyc, requires_deposit FROM campaigns WHERE id = ?').get(click.campaign_id) as any;
-        if (fullCampaign?.requires_install && !confirmedTypes.has('install')) missingSteps.push('install');
-        if (fullCampaign?.requires_signup && !confirmedTypes.has('signup')) missingSteps.push('signup');
-        if (fullCampaign?.requires_kyc && !confirmedTypes.has('kyc')) missingSteps.push('kyc');
-        if (fullCampaign?.requires_deposit && !confirmedTypes.has('deposit')) missingSteps.push('deposit');
+        const legacySteps: ConfiguredStepRow[] = [];
+        let ord = 1;
+        if (fullCampaign?.requires_install) legacySteps.push({ id: 'v_install', campaign_id: click.campaign_id, step_order: ord++, step_type: 'install', title: 'App Install', description: '', is_required: 1, min_deposit_amount: 0 });
+        if (fullCampaign?.requires_signup) legacySteps.push({ id: 'v_signup', campaign_id: click.campaign_id, step_order: ord++, step_type: 'signup', title: 'Account Registration', description: '', is_required: 1, min_deposit_amount: 0 });
+        if (fullCampaign?.requires_kyc) legacySteps.push({ id: 'v_kyc', campaign_id: click.campaign_id, step_order: ord++, step_type: 'kyc', title: 'KYC Verification', description: '', is_required: 1, min_deposit_amount: 0 });
+        if (fullCampaign?.requires_deposit) legacySteps.push({ id: 'v_deposit', campaign_id: click.campaign_id, step_order: ord++, step_type: 'deposit', title: 'First Deposit', description: '', is_required: 1, min_deposit_amount: click.minimum_deposit_amount || 0 });
+
+        postMatch = matchEventsToSteps(legacySteps, confirmedEvents);
       }
 
-      if (missingSteps.length > 0) {
+      if (!postMatch.allRequiredCompleted) {
+        const missingNames = postMatch.missingRequiredSteps.map((s) => s.title);
         return res.status(422).json({
           success: false,
-          error: `Simulated approval rejected: campaign steps not completed. Missing required steps: ${missingSteps.join(', ')}. Simulate individual steps first before simulating approval.`,
-          missing_steps: missingSteps,
+          error: `Simulated approval rejected: campaign steps not completed. Missing required steps: ${missingNames.join(', ')}. Simulate individual steps first before simulating approval.`,
+          missing_steps: missingNames,
         });
       }
 

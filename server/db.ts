@@ -225,6 +225,7 @@ export function initDatabase() {
       click_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
       campaign_id TEXT NOT NULL,
+      step_id TEXT,
       step_type TEXT NOT NULL,
       event_name TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -236,7 +237,8 @@ export function initDatabase() {
       created_at TEXT NOT NULL,
       FOREIGN KEY (click_id) REFERENCES offer_clicks(click_id) ON DELETE CASCADE,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
+      FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE,
+      FOREIGN KEY (step_id) REFERENCES campaign_steps(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS conversions (
@@ -377,6 +379,11 @@ export function initDatabase() {
   }
   try {
     db.exec(`ALTER TABLE offer_events ADD COLUMN verification_source TEXT DEFAULT 'unverified';`);
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.exec(`ALTER TABLE offer_events ADD COLUMN step_id TEXT REFERENCES campaign_steps(id) ON DELETE SET NULL;`);
   } catch {
     // Column already exists
   }
