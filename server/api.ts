@@ -638,15 +638,42 @@ export function sanitizeObjectForLogging(input: any): any {
 
 export function sanitizeJsonStringForLogging(input: any): string {
   if (!input) return JSON.stringify({});
+
   if (typeof input === 'string') {
+    const trimmed = input.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        return JSON.stringify(sanitizeObjectForLogging(parsed));
+      } catch {
+        // Fall through to non-JSON string sanitization if JSON parsing fails
+      }
+    }
+
+    // Non-JSON string sanitization (handles URL query strings, HTTP headers, key-value pairs, etc.)
+    let sanitized = input;
+
+    // Redact HTTP Headers (e.g. Authorization: Bearer secret, Cookie: session=secret)
+    sanitized = sanitized.replace(/(authorization|cookie|set-cookie)\s*[:=]\s*(Bearer\s+|Basic\s+)?([^\s;,"]+)/gi, '$1: [REDACTED]');
+
+    // Redact Query Parameters or Key-Value pairs containing sensitive keywords
+    sanitized = sanitized.replace(
+      /(^|[\?&;\s,{"'])((?:[a-z0-9_-]*(?:token|secret|signature|pass|auth|key|cookie)[a-z0-9_-]*))\s*[:=]\s*["']?([^&;\s,}"']+)["']?/gi,
+      '$1$2=[REDACTED]'
+    );
+
+    return sanitized;
+  }
+
+  if (typeof input === 'object') {
     try {
-      const parsed = JSON.parse(input);
-      return JSON.stringify(sanitizeObjectForLogging(parsed));
+      return JSON.stringify(sanitizeObjectForLogging(input));
     } catch {
-      return input.replace(/(token|key|signature|secret|authorization|password)=[^&]+/gi, '$1=[REDACTED]');
+      return JSON.stringify({ error: '[UNSERIALIZABLE_OBJECT]' });
     }
   }
-  return JSON.stringify(sanitizeObjectForLogging(input));
+
+  return String(input);
 }
 
 /* ==========================================================================
@@ -658,14 +685,45 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
   try {
     const params = { ...req.query, ...req.body };
     const rawClickId = params.click_id || params.subid || params.subid1;
-    const clickId = typeof rawClickId === 'string' ? rawClickId.trim() : (rawClickId ? String(rawClickId).trim() : '');
+    const clickId = typeof rawClickId === 'string' ? rawClickId.trim() : (typeof rawClickId === 'number' ? String(rawClickId) : '');
 
     const rawTxId = params.order_id || params.tx_id || params.transaction_id;
     const txId = typeof rawTxId === 'string' ? rawTxId.trim() : (typeof rawTxId === 'number' ? String(rawTxId) : '');
 
-    const eventType = (params.event_type || params.event || params.event_name || params.status || 'action').toLowerCase();
-    const amount = parseFloat(params.amount || params.payout || '0');
-    const token = (params.token || params.key || req.headers['x-mitgo-signature'] || req.headers['x-postback-token']) as string | undefined;
+    const rawEventType = params.event_type || params.event || params.event_name || params.status;
+    let eventType = 'action';
+    if (typeof rawEventType === 'string') {
+      eventType = rawEventType.trim().toLowerCase();
+    } else if (typeof rawEventType === 'number') {
+      eventType = String(rawEventType).trim().toLowerCase();
+    } else if (rawEventType !== undefined && rawEventType !== null) {
+      logPostback('mitgo', req.method, params, req.headers, clickId || null, txId || '[MISSING_TX_ID]', 'invalid', 'invalid_event_type_type', 400);
+      return res.status(400).json({ success: false, error: 'Invalid event_type parameter type. Must be a string or number.' });
+    }
+
+    if (!/^[a-z0-9_-]{1,64}$/.test(eventType)) {
+      logPostback('mitgo', req.method, params, req.headers, clickId || null, txId || '[MISSING_TX_ID]', 'invalid', 'invalid_event_type_format', 400);
+      return res.status(400).json({ success: false, error: 'Invalid event_type format. Must be alphanumeric (1-64 characters).' });
+    }
+
+    const rawAmount = params.amount || params.payout || '0';
+    let amount = 0;
+    if (typeof rawAmount === 'number') {
+      amount = rawAmount;
+    } else if (typeof rawAmount === 'string') {
+      amount = parseFloat(rawAmount);
+    } else {
+      logPostback('mitgo', req.method, params, req.headers, clickId || null, txId || '[MISSING_TX_ID]', eventType, 'invalid_amount_type', 400);
+      return res.status(400).json({ success: false, error: 'Invalid amount parameter type. Must be a number or numeric string.' });
+    }
+
+    if (isNaN(amount) || !isFinite(amount) || amount < 0) {
+      logPostback('mitgo', req.method, params, req.headers, clickId || null, txId || '[MISSING_TX_ID]', eventType, 'invalid_amount_value', 400);
+      return res.status(400).json({ success: false, error: 'Invalid amount value. Must be a finite non-negative number.' });
+    }
+
+    const rawToken = params.token || params.key || req.headers['x-mitgo-signature'] || req.headers['x-postback-token'];
+    const token = typeof rawToken === 'string' ? rawToken : (typeof rawToken === 'number' ? String(rawToken) : undefined);
     const now = new Date().toISOString();
 
     // REQUIREMENT 2: REJECT MISSING OR EMPTY PROVIDER TRANSACTION ID (Do not generate fake tx_' + Date.now())

@@ -22,9 +22,8 @@ for (const ext of ['', '-wal', '-shm']) {
 
 // Import server modules after DATABASE_PATH is defined
 const { db, initDatabase, hashPassword } = await import('./server/db.js');
-const { approveConversion } = await import('./server/api.js');
+const { approveConversion, apiRouter, sanitizeJsonStringForLogging } = await import('./server/api.js');
 const { config, validateProductionConfig } = await import('./server/config.js');
-const { apiRouter } = await import('./server/api.js');
 const { adminAuthRouter, adminAuthMiddleware } = await import('./server/adminAuth.js');
 import express, { Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
@@ -250,6 +249,33 @@ async function runComprehensiveSecuritySuite() {
     const payloadRedacted = logRow?.payload.includes('[REDACTED]') && !logRow?.payload.includes(secretToken);
     const headersRedacted = logRow?.headers.includes('[REDACTED]') && !logRow?.headers.includes(secretHeaderToken);
     assert(Boolean(payloadRedacted && headersRedacted), 'Postback logs sanitize and redact sensitive query tokens, signatures, and auth headers ([REDACTED] stored)');
+
+    // REGRESSION TEST 3B: sanitizeJsonStringForLogging non-JSON string fallback test
+    const rawQueryStr = 'click_id=clk123&token=my_secret_token_val&subid_secret=topsecret';
+    const sanitizedQueryStr = sanitizeJsonStringForLogging(rawQueryStr);
+    assert(sanitizedQueryStr.includes('[REDACTED]') && !sanitizedQueryStr.includes('my_secret_token_val') && !sanitizedQueryStr.includes('topsecret'), 'Non-JSON query string fallback redacts sensitive token parameters');
+
+    const rawHeaderStr = 'Authorization: Bearer secret_bearer_token_xyz';
+    const sanitizedHeaderStr = sanitizeJsonStringForLogging(rawHeaderStr);
+    assert(sanitizedHeaderStr.includes('[REDACTED]') && !sanitizedHeaderStr.includes('secret_bearer_token_xyz'), 'Non-JSON header string fallback redacts Authorization Bearer token');
+
+    // REGRESSION TEST 3C: Postback parameter type & format validation (controlled 400 response, no crash)
+    const invalidTypeRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_invalidtype_1&token=valid_test_sandbox_secret_123`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event_type: { nested: 'object' } }),
+    });
+    assert(invalidTypeRes.status === 400, 'Invalid event_type parameter type (object) rejected with controlled 400 Bad Request without server crash');
+
+    const invalidFormatRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_invalidfmt_1&event_type=install<script>alert(1)</script>&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(invalidFormatRes.status === 400, 'Non-alphanumeric event_type format rejected with controlled 400 Bad Request');
+
+    const invalidAmountRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_invalidamt_1&event_type=install&amount=-100&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(invalidAmountRes.status === 400, 'Negative amount value rejected with controlled 400 Bad Request');
 
     // REGRESSION TEST 4: Missing sandbox token → 403
     const noTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_notoken_1`, {
