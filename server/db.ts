@@ -404,6 +404,11 @@ export function initDatabase() {
   } catch {
     // Index already exists
   }
+  try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_withdrawal_debit_unique ON cashback_ledger(withdrawal_id) WHERE type = 'withdrawal_debit';`);
+  } catch {
+    // Index already exists
+  }
 
   initSystemSettings();
   bootstrapInitialAdminFromEnv();

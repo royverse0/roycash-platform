@@ -1115,27 +1115,47 @@ async function runComprehensiveSecuritySuite() {
     });
     assert(duplicateUtrRes.status === 400, 'M1.3-17: Reusing an existing payment reference (UTR) is rejected with 400');
 
-    // Test two matching debit holds for one withdrawal (should fail rejection)
-    const twoHoldsWdrId = 'wdr_two_holds_' + Date.now();
+    // Test database-level protection against multiple withdrawal_debit entries for the same withdrawal_id
+    const dbUniqueWdrId = 'wdr_db_unique_' + Date.now();
     db.prepare(`
       INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
-      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "twoholds@paytm"}', 'pending', ?)
-    `).run(twoHoldsWdrId, wdrTestUserId, 150, now);
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "dbunique@paytm"}', 'pending', ?)
+    `).run(dbUniqueWdrId, wdrTestUserId, 80, now);
     db.prepare(`
       INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
-      VALUES (?, ?, ?, 'withdrawal_debit', 150, 'withdrawable', 'deducted', 'Hold 1', ?)
-    `).run('ldg_h1_' + Date.now(), wdrTestUserId, twoHoldsWdrId, now);
-    db.prepare(`
-      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
-      VALUES (?, ?, ?, 'withdrawal_debit', 150, 'withdrawable', 'deducted', 'Hold 2', ?)
-    `).run('ldg_h2_' + Date.now(), wdrTestUserId, twoHoldsWdrId, now);
+      VALUES (?, ?, ?, 'withdrawal_debit', 80, 'withdrawable', 'deducted', 'First debit', ?)
+    `).run('ldg_db1_' + Date.now(), wdrTestUserId, dbUniqueWdrId, now);
 
-    const twoHoldsRejRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${twoHoldsWdrId}/status`, {
+    let dbUniqueConstraintCaught = false;
+    try {
+      db.prepare(`
+        INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+        VALUES (?, ?, ?, 'withdrawal_debit', 80, 'withdrawable', 'deducted', 'Second debit duplicate', ?)
+      `).run('ldg_db2_' + Date.now(), wdrTestUserId, dbUniqueWdrId, now);
+    } catch (err: any) {
+      if (err.message && err.message.includes('UNIQUE constraint failed')) {
+        dbUniqueConstraintCaught = true;
+      }
+    }
+    assert(dbUniqueConstraintCaught, 'M1.3-18: Database unique partial index correctly prevents multiple withdrawal_debit entries for the same withdrawal_id');
+
+    // Test rollback behavior for invalid hold metadata (invalid balance_type or status)
+    const invMetaWdrId = 'wdr_inv_meta_' + Date.now();
+    db.prepare(`
+      INSERT INTO withdrawal_requests (id, user_id, amount, currency, payout_method, payout_details, status, requested_at)
+      VALUES (?, ?, ?, 'INR', 'upi', '{"upi_id": "inv@paytm"}', 'pending', ?)
+    `).run(invMetaWdrId, wdrTestUserId, 120, now);
+    db.prepare(`
+      INSERT INTO cashback_ledger (id, user_id, withdrawal_id, type, amount, balance_type, status, description, created_at)
+      VALUES (?, ?, ?, 'withdrawal_debit', 120, 'invalid_type', 'available', 'Invalid Meta Hold', ?)
+    `).run('ldg_inv_' + Date.now(), wdrTestUserId, invMetaWdrId, now);
+
+    const invMetaRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${invMetaWdrId}/status`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
-      body: JSON.stringify({ status: 'rejected', rejection_reason: 'Two holds test' }),
+      body: JSON.stringify({ status: 'rejected', rejection_reason: 'Invalid metadata test' }),
     });
-    assert(twoHoldsRejRes.status === 400, 'M1.3-18: Rejection with two matching debit holds is rejected with 400');
+    assert(invMetaRes.status === 400, 'M1.3-19: Rejection with invalid hold balance_type/status is rejected with 400 and rolls back');
 
     const rejectWdrId = 'wdr_reject_' + Date.now();
     db.prepare(`
@@ -1155,17 +1175,25 @@ async function runComprehensiveSecuritySuite() {
     const rejectJson = await rejectRes.json();
     assert(rejectRes.status === 200 && rejectJson.success, 'M1.3-7a: Rejected request succeeds with rejection reason');
 
+    // Test repeated/duplicate rejection requests
+    const repeatRejectRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${rejectWdrId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
+      body: JSON.stringify({ status: 'rejected', rejection_reason: 'Duplicate rejection attempt' }),
+    });
+    assert(repeatRejectRes.status === 400, 'M1.3-20: Repeated rejection request on already rejected withdrawal is rejected with 400');
+
     const refundEntries = db.prepare(`
       SELECT * FROM cashback_ledger WHERE user_id = ? AND type = 'admin_adjustment' AND withdrawal_id = ?
     `).all(wdrTestUserId, rejectWdrId);
-    assert(refundEntries.length === 1, 'M1.3-7b: Rejected request refunds held amount exactly once via withdrawal_id');
+    assert(refundEntries.length === 1, 'M1.3-7b: Rejected request refunds held amount exactly once via withdrawal_id (no duplicate refund created)');
 
     const rejectAfterRes = await fetch(`${BASE_URL}/api/admin/withdrawals/${rejectWdrId}/status`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', Cookie: `roycash_admin_token=${adminCookie}`, 'X-Requested-With': 'XMLHttpRequest', 'Origin': ORIGIN },
       body: JSON.stringify({ status: 'approved' }),
     });
-    assert(rejectAfterRes.status === 400, 'M1.3-8: Rejected request cannot be approved or processed later');
+    assert(rejectAfterRes.status === 400, 'M1.3-8: Rejected request cannot be approved or processed later (no invalid status transition survives)');
 
     const auditLog = db.prepare(`
       SELECT * FROM admin_activity_logs WHERE action = 'WITHDRAWAL_STATUS_UPDATED' ORDER BY created_at DESC LIMIT 1
@@ -1176,7 +1204,7 @@ async function runComprehensiveSecuritySuite() {
       SELECT COALESCE(SUM(CASE WHEN status = 'available' THEN amount ELSE -amount END), 0) as bal
       FROM cashback_ledger WHERE user_id = ? AND balance_type = 'withdrawable'
     `).get(wdrTestUserId) as any).bal;
-    assert(userLedgerSum === 0, 'M1.3-14: Exact wallet balance calculation is correct after transitions (0)');
+    assert(userLedgerSum === 220, 'M1.3-14: Exact wallet balance calculation is correct after transitions (220)');
 
   } finally {
     // =========================================================================
