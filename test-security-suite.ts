@@ -250,16 +250,36 @@ async function runComprehensiveSecuritySuite() {
     const headersRedacted = logRow?.headers.includes('[REDACTED]') && !logRow?.headers.includes(secretHeaderToken);
     assert(Boolean(payloadRedacted && headersRedacted), 'Postback logs sanitize and redact sensitive query tokens, signatures, and auth headers ([REDACTED] stored)');
 
-    // REGRESSION TEST 3B: sanitizeJsonStringForLogging non-JSON string fallback test
+    // REGRESSION TEST 3B: Advanced Log Sanitization (URL-encoded values & Mixed-Case Keys)
     const rawQueryStr = 'click_id=clk123&token=my_secret_token_val&subid_secret=topsecret';
     const sanitizedQueryStr = sanitizeJsonStringForLogging(rawQueryStr);
     assert(sanitizedQueryStr.includes('[REDACTED]') && !sanitizedQueryStr.includes('my_secret_token_val') && !sanitizedQueryStr.includes('topsecret'), 'Non-JSON query string fallback redacts sensitive token parameters');
 
-    const rawHeaderStr = 'Authorization: Bearer secret_bearer_token_xyz';
-    const sanitizedHeaderStr = sanitizeJsonStringForLogging(rawHeaderStr);
-    assert(sanitizedHeaderStr.includes('[REDACTED]') && !sanitizedHeaderStr.includes('secret_bearer_token_xyz'), 'Non-JSON header string fallback redacts Authorization Bearer token');
+    const urlEncodedStr = 'click_id%3Dclk123%26tOkEn%3Dmy_secret_url_encoded_token_99';
+    const sanitizedUrlEncodedStr = sanitizeJsonStringForLogging(urlEncodedStr);
+    assert(sanitizedUrlEncodedStr.includes('[REDACTED]') && !sanitizedUrlEncodedStr.includes('my_secret_url_encoded_token_99'), 'URL-encoded query string redacts encoded sensitive tokens');
 
-    // REGRESSION TEST 3C: Postback parameter type & format validation (controlled 400 response, no crash)
+    const mixedCaseHeaderStr = 'AuThOrIzAtIoN: Bearer secret_bearer_mixed_case';
+    const sanitizedMixedHeaderStr = sanitizeJsonStringForLogging(mixedCaseHeaderStr);
+    assert(sanitizedMixedHeaderStr.includes('[REDACTED]') && !sanitizedMixedHeaderStr.includes('secret_bearer_mixed_case'), 'Mixed-case Authorization header string redacts Bearer token');
+
+    const mixedCaseObj = {
+      ToKeN: 'secret_token_val_111',
+      AuThOrIzAtIoN: 'Bearer secret_auth_222',
+      CoOkIe: 'roycash_token=secret_cookie_333',
+      'SeT-cOoKiE': 'session=secret_setcookie_444',
+      'x-MiTgO-sIgNaTuRe': 'secret_sig_555',
+    };
+    const sanitizedObjStr = sanitizeJsonStringForLogging(mixedCaseObj);
+    const objHasNoSecrets =
+      !sanitizedObjStr.includes('secret_token_val_111') &&
+      !sanitizedObjStr.includes('secret_auth_222') &&
+      !sanitizedObjStr.includes('secret_cookie_333') &&
+      !sanitizedObjStr.includes('secret_setcookie_444') &&
+      !sanitizedObjStr.includes('secret_sig_555');
+    assert(objHasNoSecrets && sanitizedObjStr.includes('[REDACTED]'), 'Mixed-case keys (ToKeN, AuThOrIzAtIoN, CoOkIe, SeT-cOoKiE, x-MiTgO-sIgNaTuRe) are completely redacted in logs');
+
+    // REGRESSION TEST 3C: Strict Amount Validation & Parameter Format Enforcement
     const invalidTypeRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_invalidtype_1&token=valid_test_sandbox_secret_123`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -272,10 +292,35 @@ async function runComprehensiveSecuritySuite() {
     });
     assert(invalidFormatRes.status === 400, 'Non-alphanumeric event_type format rejected with controlled 400 Bad Request');
 
-    const invalidAmountRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_invalidamt_1&event_type=install&amount=-100&token=valid_test_sandbox_secret_123`, {
+    // Trailing characters in numeric string (100abc) -> 400 Bad Request
+    const trailingNumRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_trailing_1&event_type=install&amount=100abc&token=valid_test_sandbox_secret_123`, {
       method: 'GET',
     });
-    assert(invalidAmountRes.status === 400, 'Negative amount value rejected with controlled 400 Bad Request');
+    assert(trailingNumRes.status === 400, 'Amount with trailing non-numeric characters ("100abc") rejected with 400 Bad Request');
+
+    // Float with trailing characters (10.50xyz) -> 400 Bad Request
+    const trailingFloatRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_trailing_2&event_type=install&amount=10.50xyz&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(trailingFloatRes.status === 400, 'Float amount with trailing characters ("10.50xyz") rejected with 400 Bad Request');
+
+    // Negative amount (-100) -> 400 Bad Request
+    const negativeAmtRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_invalidamt_1&event_type=install&amount=-100&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(negativeAmtRes.status === 400, 'Negative amount value rejected with controlled 400 Bad Request');
+
+    // Non-numeric Infinity / NaN -> 400 Bad Request
+    const infinityAmtRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_inf_1&event_type=install&amount=Infinity&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(infinityAmtRes.status === 400, 'Infinity amount string rejected with controlled 400 Bad Request');
+
+    // Clean numeric string with leading/trailing whitespace (" 100.50 ") -> 200 OK (accepted)
+    const cleanWhitespaceAmtRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&tx_id=tx_clean_ws_1&event_type=install&amount=%20100.50%20&token=valid_test_sandbox_secret_123`, {
+      method: 'GET',
+    });
+    assert(cleanWhitespaceAmtRes.status === 200, 'Clean numeric string with whitespace (" 100.50 ") correctly accepted');
 
     // REGRESSION TEST 4: Missing sandbox token → 403
     const noTokenRes = await fetch(`${BASE_URL}/api/postback/mitgo?click_id=${demoClickId1}&event_type=install&tx_id=tx_notoken_1`, {

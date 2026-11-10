@@ -640,7 +640,18 @@ export function sanitizeJsonStringForLogging(input: any): string {
   if (!input) return JSON.stringify({});
 
   if (typeof input === 'string') {
-    const trimmed = input.trim();
+    let str = input;
+
+    // Decode URL-encoded strings if URL encoding (%20, %3D, %26, etc.) is detected
+    if (str.includes('%')) {
+      try {
+        str = decodeURIComponent(str);
+      } catch {
+        // Fall back to raw string if URI decoding fails
+      }
+    }
+
+    const trimmed = str.trim();
     if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
       try {
         const parsed = JSON.parse(trimmed);
@@ -651,12 +662,12 @@ export function sanitizeJsonStringForLogging(input: any): string {
     }
 
     // Non-JSON string sanitization (handles URL query strings, HTTP headers, key-value pairs, etc.)
-    let sanitized = input;
+    let sanitized = str;
 
-    // Redact HTTP Headers (e.g. Authorization: Bearer secret, Cookie: session=secret)
-    sanitized = sanitized.replace(/(authorization|cookie|set-cookie)\s*[:=]\s*(Bearer\s+|Basic\s+)?([^\s;,"]+)/gi, '$1: [REDACTED]');
+    // Redact HTTP Headers (e.g. Authorization: Bearer secret, Cookie: session=secret, Set-Cookie: ...)
+    sanitized = sanitized.replace(/(authorization|cookie|set-cookie)\s*[:=]\s*(Bearer\s+|Basic\s+)?([^\s;,&"]+)/gi, '$1: [REDACTED]');
 
-    // Redact Query Parameters or Key-Value pairs containing sensitive keywords
+    // Redact Query Parameters or Key-Value pairs containing sensitive keywords (case-insensitive)
     sanitized = sanitized.replace(
       /(^|[\?&;\s,{"'])((?:[a-z0-9_-]*(?:token|secret|signature|pass|auth|key|cookie)[a-z0-9_-]*))\s*[:=]\s*["']?([^&;\s,}"']+)["']?/gi,
       '$1$2=[REDACTED]'
@@ -711,7 +722,14 @@ apiRouter.all('/postback/mitgo', (req: Request, res: Response) => {
     if (typeof rawAmount === 'number') {
       amount = rawAmount;
     } else if (typeof rawAmount === 'string') {
-      amount = parseFloat(rawAmount);
+      const trimmed = rawAmount.trim();
+      // Enforce strictly formatted integer or float number: optional digits, dot, digits.
+      // Reject trailing non-numeric characters like "100abc", "10.50xyz", "abc", etc.
+      if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+        logPostback('mitgo', req.method, params, req.headers, clickId || null, txId || '[MISSING_TX_ID]', eventType, 'invalid_amount_format', 400);
+        return res.status(400).json({ success: false, error: 'Invalid amount format. Must be a clean non-negative numeric value without trailing characters.' });
+      }
+      amount = Number(trimmed);
     } else {
       logPostback('mitgo', req.method, params, req.headers, clickId || null, txId || '[MISSING_TX_ID]', eventType, 'invalid_amount_type', 400);
       return res.status(400).json({ success: false, error: 'Invalid amount parameter type. Must be a number or numeric string.' });
